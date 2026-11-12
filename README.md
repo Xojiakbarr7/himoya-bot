@@ -5,12 +5,13 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 ## Nimalar ishlaydi
 
 - Business akkaunt ulanishini qabul qiladi va ulanish ma’lumotlarini saqlaydi.
-- Ruxsat berilgan shaxsiy chatlardagi yangi xabarlarni tekshiradi.
+- Ruxsat berilgan shaxsiy chatlardagi kiruvchi va egasi yuborgan xabarlarni tekshiradi.
 - `.apk` va ayrim ishga tushiriladigan fayllarni nomi/MIME turi bo‘yicha belgilaydi. Fayllarni yuklab olmaydi.
 - Havolalarni matndan va Telegram message entity’laridan topadi.
 - Qisqartirilgan havola, IP-manzilli domen, punycode va Telegram nomiga o‘xshatilgan domenlarni mahalliy qoidalar bilan baholaydi.
 - Kod/parol so‘rash yoki shoshiltirishga o‘xshash ayrim o‘zbekcha/ruscha iboralarni aniqlaydi.
 - Xavf belgisi topilganda akkaunt egasining Telegram bot chatiga ogohlantirish yuboradi.
+- Egasi akkauntidan APK, havola yoki shubhali ibora yuborilsa, o‘sha xabar ostiga javob qilib oluvchini ogohlantiradi. Oddiy xabarlarning ostiga ogohlantirish qo‘shmaydi.
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
 - Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; xabarlarni saqlamaydi.
 - Guruhda APK, ishga tushiriladigan fayl, istalgan havola yoki belgilangan firibgarlik iborasi topilsa, xabarni o‘chiradi va guruhga kim hamda nima yuborganini yozadi.
@@ -21,6 +22,8 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 Bu versiya to‘liq antivirus emas. APK faylni **zararli** deb tasdiqlamaydi; uni tekshirilmagan ilova sifatida ogohlantiradi. Havola bahosi tarmoqda manzilni ochmasdan, mahalliy belgilar asosida beriladi. Keyinroq reputatsiya xizmati yoki hash tekshiruvi qo‘shilishi mumkin.
 
 Bot faqat foydalanuvchi Telegram Business’da unga ochib bergan chatlardagi va ulanishdan keyin kelgan xabarlarni oladi. Chat tanlashda mavjud/yangi chatlar hamda kontaktlar/kontakt bo‘lmaganlarni tanlang. Maxfiy chatlar va ruxsat berilmagan suhbatlar botga kelmaydi. BotFather sozlamalarida Business Mode yoqilgan bo‘lishi kerak.
+
+Egasi yuborgan shubhali xabar ostiga oluvchiga javob yozish uchun Telegram Business’da botga xabarlarni o‘qish bilan birga **Reply / Javob berish** huquqini ham bering. Telegram bu javobni ayrim shaxsiy chatlarda, yaqinda kiruvchi xabar bo‘lganida va ulanish ruxsatlari yetarli bo‘lganda qabul qiladi. Huquq yoki Telegram cheklovi bo‘lsa, ogohlantirish yuborilmasligi mumkin. Bot shubhali belgilarni taxminiy aniqlaydi; APK’ni antivirus kabi tekshirmaydi.
 
 ### Guruh moderatsiyasi
 
@@ -60,4 +63,4 @@ Render bepul rejasi doim uyg‘oq ishlash kafolatini bermaydi. Telegram webhook 
 
 ## Ruxsatlar
 
-Kerakli ruxsat — ruxsat berilgan chatlardagi xabarlarni o‘qish va biznes ulanish yangilanishlarini olish. Bot foydalanuvchi nomidan xabar yozish, xabar o‘chirish yoki profilni o‘zgartirish huquqlarini so‘ramaydi.
+Kerakli ruxsatlar — ruxsat berilgan chatlardagi xabarlarni o‘qish, biznes ulanish yangilanishlarini olish va shubhali xabarga javob berish. Javob huquqi oddiy xabarlarni jo‘natish uchun ishlatilmaydi; faqat xavf belgisi topilgan egasi yuborgan xabar ostiga ogohlantirish qo‘yiladi.
