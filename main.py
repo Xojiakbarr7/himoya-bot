@@ -327,14 +327,18 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
     await api(session, "sendMessage", {
         "chat_id": chat_id,
         "text": (
-            "🛡 <b>Telegram Himoya botiga xush kelibsiz!</b>\n\n"
-            "Men Telegram Business orqali ruxsat berilgan shaxsiy chatlardagi xabarlarni tekshiraman. "
-            "Kiruvchi xabarda xavf belgisi topsam, sizga shu yerga xabar beraman. "
-            "Sizning akkauntingizdan APK yoki shubhali havola yuborilsa, oluvchiga xabar ostida ogohlantirish yozaman.\n\n"
-            "Ulash uchun Telegram sozlamalaridan <b>Telegram Business → Chatbots</b> bo‘limiga kiring, "
-            "ushbu botni tanlang va chatlarni o‘qish hamda javob berish ruxsatini bering. Mavjud va yangi chatlar, "
-            "kontaktlar va kontakt bo‘lmaganlarni tanlang. BotFather’da bot uchun Business Mode ham yoqilgan bo‘lishi kerak.\n\n"
-            "Bot xabar matnlarini bazada saqlamaydi, fayllarni yuklab olmaydi va tashqi xizmatga yubormaydi."
+            "🛡 <b>Qalqon AI — Telegram himoyasi</b>\n"
+            "APK, havola va firibgarlik belgilarini kuzatishga yordam beradi.\n\n"
+            "<b>Afzalliklari</b>\n"
+            "• Ruxsat berilgan shaxsiy chatlardagi xavf belgilarini aniqlab, sizga ogohlantirish yuboradi.\n"
+            "• <b>🗑 Avto o‘chirish sozlamasi</b> orqali APK/dastur fayllari va aniq shubhali havolalarni o‘chirishni o‘zingiz yoqasiz yoki o‘chirasiz.\n"
+            "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
+            "<b>Qanday yoqiladi?</b>\n"
+            "1. @BotFather’da bot uchun <b>Business Mode</b>ni yoqing.\n"
+            "2. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
+            "3. Shaxsiy chatlarda avto o‘chirish uchun botga <b>qabul qilingan xabarlarni o‘chirish</b> huquqini bering, keyin pastdagi sozlama tugmasidan yoqing.\n"
+            "4. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
+            "⚠️ Bot APK faylni antivirus kabi tekshirmaydi; xavf belgilariga qarab ogohlantiradi. Xabar matnlari bazada saqlanmaydi, fayllar yuklab olinmaydi."
         ),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
