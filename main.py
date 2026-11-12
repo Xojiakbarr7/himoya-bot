@@ -51,11 +51,13 @@ BUTTON_TIPS = "🔐 Xavfsizlik maslahatlari"
 BUTTON_SCAN = "🔎 Xabarni tekshirish"
 BUTTON_HELP = "ℹ️ Qanday ishlaydi"
 BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
+BUTTON_OUTGOING_WARNING = "⚠️ Yuborilgan xabar ogohlantirishi"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
         [BUTTON_SCAN, BUTTON_HELP],
         [BUTTON_DELETE_MODE],
+        [BUTTON_OUTGOING_WARNING],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -115,8 +117,14 @@ class Store:
         )
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS user_settings ("
-            "owner_user_id INTEGER PRIMARY KEY, auto_delete_harmful INTEGER NOT NULL DEFAULT 0)"
+            "owner_user_id INTEGER PRIMARY KEY, auto_delete_harmful INTEGER NOT NULL DEFAULT 0, "
+            "outgoing_warning INTEGER NOT NULL DEFAULT 0)"
         )
+        setting_columns = {row[1] for row in self.db.execute("PRAGMA table_info(user_settings)")}
+        if "outgoing_warning" not in setting_columns:
+            self.db.execute(
+                "ALTER TABLE user_settings ADD COLUMN outgoing_warning INTEGER NOT NULL DEFAULT 0"
+            )
         self.db.commit()
 
     def save_connection(self, connection: dict[str, Any]) -> None:
@@ -155,6 +163,21 @@ class Store:
         self.db.execute(
             "INSERT INTO user_settings(owner_user_id, auto_delete_harmful) VALUES(?,?) "
             "ON CONFLICT(owner_user_id) DO UPDATE SET auto_delete_harmful=excluded.auto_delete_harmful",
+            (int(owner_user_id), int(enabled)),
+        )
+        self.db.commit()
+
+    def outgoing_warning_enabled(self, owner_user_id: int) -> bool:
+        row = self.db.execute(
+            "SELECT outgoing_warning FROM user_settings WHERE owner_user_id=?",
+            (int(owner_user_id),),
+        ).fetchone()
+        return bool(row[0]) if row else False
+
+    def set_outgoing_warning(self, owner_user_id: int, enabled: bool) -> None:
+        self.db.execute(
+            "INSERT INTO user_settings(owner_user_id, outgoing_warning) VALUES(?,?) "
+            "ON CONFLICT(owner_user_id) DO UPDATE SET outgoing_warning=excluded.outgoing_warning",
             (int(owner_user_id), int(enabled)),
         )
         self.db.commit()
@@ -298,6 +321,17 @@ def business_deletion_reason(message: dict[str, Any], result: dict[str, Any]) ->
     return ""
 
 
+def business_outgoing_warning_reason(message: dict[str, Any], result: dict[str, Any]) -> str:
+    document = message.get("document") or {}
+    file_name = str(document.get("file_name") or result.get("file_name") or "").lower()
+    mime = str(document.get("mime_type") or "").lower()
+    if file_name.endswith(".apk") or mime == "application/vnd.android.package-archive":
+        return "APK"
+    if any(int(link.get("score", 0)) >= 35 for link in result.get("links", [])):
+        return "shubhali havola"
+    return ""
+
+
 def alert_message(result: dict[str, Any]) -> str:
     if result["level"] == "HAVOLA ESLATMASI":
         intro = "Xabarda havola bor. Bot saytni ochmaydi va uning xavfsizligini tasdiqlamaydi."
@@ -332,10 +366,11 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "<b>Afzalliklari</b>\n"
             "• Ruxsat berilgan shaxsiy chatlardagi xavf belgilarini aniqlab, sizga ogohlantirish yuboradi.\n"
             "• <b>🗑 Avto o‘chirish sozlamasi</b> orqali APK/dastur fayllari va aniq shubhali havolalarni o‘chirishni o‘zingiz yoqasiz yoki o‘chirasiz.\n"
+            "• <b>⚠️ Yuborilgan xabar ogohlantirishi</b> orqali akkauntingizdan APK yoki shubhali havola ketsa, oluvchiga ogohlantirish yozishni yoqasiz yoki o‘chirasiz.\n"
             "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
             "<b>Qanday yoqiladi?</b>\n"
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
-            "2. Shaxsiy chatlarda avto o‘chirish uchun botga <b>qabul qilingan xabarlarni o‘chirish</b> huquqini bering, keyin pastdagi sozlama tugmasidan yoqing.\n"
+            "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>qabul qilingan xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
             "3. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
             "⚠️ Bot APK faylni antivirus kabi tekshirmaydi; xavf belgilariga qarab ogohlantiradi. Xabar matnlari bazada saqlanmaydi, fayllar yuklab olinmaydi."
         ),
@@ -386,6 +421,36 @@ async def send_delete_mode_menu(
     })
 
 
+def outgoing_warning_content(store: Store, owner_user_id: int) -> tuple[str, dict[str, Any]]:
+    enabled = store.outgoing_warning_enabled(owner_user_id)
+    status = "🟢 YOQILGAN" if enabled else "⚪ O‘CHIRILGAN"
+    text = (
+        f"⚠️ <b>Yuborilgan xabar ogohlantirishi: {status}</b>\n\n"
+        "Yoqilganda akkauntingizdan APK yoki aniq shubhali havola yuborilsa, bot uning ostiga "
+        "oluvchiga siz tanlagan ogohlantirishni yozishga urinadi. Oddiy xabarlarga javob qo‘shilmaydi.\n\n"
+        "Buning uchun Telegram Business’da <b>Javob berish</b> huquqi kerak. Telegram ayrim chatlarda "
+        "javobni cheklashi mumkin; bunday holatda ogohlantirish yetib bormasligi mumkin."
+    )
+    keyboard = {"inline_keyboard": [[
+        {"text": "✅ Yoqish", "callback_data": "outgoing_warning:on"},
+        {"text": "⏸ O‘chirish", "callback_data": "outgoing_warning:off"},
+    ]]}
+    return text, keyboard
+
+
+async def send_outgoing_warning_menu(
+    session: aiohttp.ClientSession, store: Store, chat_id: int,
+) -> None:
+    text, keyboard = outgoing_warning_content(store, chat_id)
+    await api(session, "sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": keyboard,
+        "disable_web_page_preview": True,
+    })
+
+
 async def handle_status(session: aiohttp.ClientSession, chat_id: int) -> None:
     try:
         info = await api(session, "getWebhookInfo")
@@ -427,7 +492,7 @@ async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]
             "🛡 <b>Qalqon AI</b>\n\n"
             "Pastdagi tugmalar orqali bot holatini ko‘ring, xavfsizlik maslahatlarini oling, botni qo‘lda tekshiring yoki uning ishlashini bilib oling.\n\n"
             "Bot ruxsat berilgan shaxsiy chatlardagi havola, APK va firibgarlikka o‘xshash iboralarni belgilaydi. "
-            "Siz yuborgan shunday xabar topilsa, u xabar ostiga oluvchiga ogohlantirish yozadi. "
+            "Yuborilgan xabar ogohlantirishi va avto o‘chirish rejimlarini tugmalardan yoqib/o‘chirish mumkin. "
             "U faylni yuklab olmaydi va zararli ekanini tasdiqlamaydi.")
 
 
@@ -455,6 +520,8 @@ async def handle_keyboard_button(
             "Bot faqat ma’lum xavf belgilarini tekshiradi: havolani ochmaydi, faylni yuklab olmaydi va APK’ni antivirus kabi tahlil qilmaydi.")
     elif text == BUTTON_DELETE_MODE:
         await send_delete_mode_menu(session, store, chat_id)
+    elif text == BUTTON_OUTGOING_WARNING:
+        await send_outgoing_warning_menu(session, store, chat_id)
     else:
         return False
     return True
@@ -549,7 +616,7 @@ async def moderate_group_message(session: aiohttp.ClientSession, message: dict[s
 
 
 async def warn_recipient_about_suspicious_outgoing(
-    session: aiohttp.ClientSession, message: dict[str, Any], connection_id: str,
+    session: aiohttp.ClientSession, owner_chat_id: int, message: dict[str, Any], connection_id: str,
     result: dict[str, Any],
 ) -> None:
     """Reply under a risky message sent from the connected business account."""
@@ -577,6 +644,15 @@ async def warn_recipient_about_suspicious_outgoing(
         log.info("Shubhali outgoing xabarga Business ogohlantirishi javob qilindi")
     except TelegramAPIError as exc:
         log.warning("Shubhali Business xabar ostiga ogohlantirish yuborilmadi: %s", exc)
+        try:
+            await send_text(
+                session,
+                owner_chat_id,
+                "⚠️ Telegram bu chatda ogohlantirishni yuborishga ruxsat bermadi. "
+                "Telegram Business sozlamalarida <b>Javob berish</b> huquqini tekshiring; ayrim chatlarda bu funksiya cheklangan.",
+            )
+        except TelegramAPIError as notify_exc:
+            log.warning("Ogohlantirish yuborilmagani haqida egaga xabar berilmadi: %s", notify_exc)
 
 
 async def delete_incoming_business_message(
@@ -648,7 +724,12 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if "callback_query" in update:
         query = update["callback_query"]
         data = query.get("data", "")
+        toggle_setting = None
         if data in {"delete_mode:on", "delete_mode:off"}:
+            toggle_setting = "delete_mode"
+        elif data in {"outgoing_warning:on", "outgoing_warning:off"}:
+            toggle_setting = "outgoing_warning"
+        if toggle_setting:
             callback_message = query.get("message") or {}
             callback_chat = callback_message.get("chat") or {}
             callback_user_id = int((query.get("from") or {}).get("id", 0))
@@ -664,8 +745,13 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
                 })
                 return
             enabled = data == "delete_mode:on"
-            store.set_auto_delete(callback_user_id, enabled)
-            text, keyboard = delete_mode_content(store, callback_user_id)
+            if toggle_setting == "outgoing_warning":
+                enabled = data == "outgoing_warning:on"
+                store.set_outgoing_warning(callback_user_id, enabled)
+                text, keyboard = outgoing_warning_content(store, callback_user_id)
+            else:
+                store.set_auto_delete(callback_user_id, enabled)
+                text, keyboard = delete_mode_content(store, callback_user_id)
             await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
             try:
                 await api(session, "editMessageText", {
@@ -677,7 +763,7 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
                     "disable_web_page_preview": True,
                 })
             except TelegramAPIError as exc:
-                log.warning("Avto o‘chirish sozlamasi xabarini yangilay olmadim: %s", exc)
+                log.warning("Himoya sozlamasi xabarini yangilay olmadim: %s", exc)
             return
         await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
         if data.startswith("why:"):
@@ -725,9 +811,11 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if not result:
         return
     if sender_id == owner_user_id:
-        await warn_recipient_about_suspicious_outgoing(
-            session, message, str(connection_id), result
-        )
+        warning_reason = business_outgoing_warning_reason(message, result)
+        if store.outgoing_warning_enabled(owner_user_id) and warning_reason:
+            await warn_recipient_about_suspicious_outgoing(
+                session, owner_chat_id, message, str(connection_id), result
+            )
         return
 
     if store.auto_delete_enabled(owner_user_id):
