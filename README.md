@@ -11,6 +11,7 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Qisqartirilgan havola, IP-manzilli domen, punycode va Telegram nomiga o‘xshatilgan domenlarni mahalliy qoidalar bilan baholaydi.
 - Kod/parol so‘rash yoki shoshiltirishga o‘xshash ayrim o‘zbekcha/ruscha iboralarni aniqlaydi.
 - Xavf belgisi topilganda akkaunt egasining Telegram bot chatiga ogohlantirish yuboradi.
+- `/status`, `/tips` va `/help` buyruqlari orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
 - Xabar matnini yoki fayllarni bazada saqlamaydi; tashqi skanerga yubormaydi.
 
 ## Muhim chegaralar
