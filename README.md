@@ -13,6 +13,7 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Xavf belgisi topilganda akkaunt egasining Telegram bot chatiga ogohlantirish yuboradi.
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
 - Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; xabarlarni saqlamaydi.
+- Guruhda APK, ishga tushiriladigan fayl, istalgan havola yoki belgilangan firibgarlik iborasi topilsa, xabarni o‘chiradi va guruhga kim hamda nima yuborganini yozadi.
 - Xabar matnini yoki fayllarni bazada saqlamaydi; tashqi skanerga yubormaydi.
 
 ## Muhim chegaralar
@@ -20,6 +21,10 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 Bu versiya to‘liq antivirus emas. APK faylni **zararli** deb tasdiqlamaydi; uni tekshirilmagan ilova sifatida ogohlantiradi. Havola bahosi tarmoqda manzilni ochmasdan, mahalliy belgilar asosida beriladi. Keyinroq reputatsiya xizmati yoki hash tekshiruvi qo‘shilishi mumkin.
 
 Bot faqat foydalanuvchi Telegram Business’da unga ochib bergan chatlardagi va ulanishdan keyin kelgan xabarlarni oladi. Chat tanlashda mavjud/yangi chatlar hamda kontaktlar/kontakt bo‘lmaganlarni tanlang. Maxfiy chatlar va ruxsat berilmagan suhbatlar botga kelmaydi. BotFather sozlamalarida Business Mode yoqilgan bo‘lishi kerak.
+
+### Guruh moderatsiyasi
+
+BotFather’da bot uchun guruhlarga qo‘shishga ruxsat bering (**Allow Groups**). Botni guruhga qo‘shib, administrator qiling va **Delete Messages** huquqini bering. Admin botlar guruh xabarlarini oladi; oddiy a’zo bo‘lsa, Telegram maxfiylik rejimi sabab barcha xabarlarni ko‘rmasligi mumkin. Bot har qanday havolani o‘chiradi, shu jumladan xavfsiz havolalarni ham. APK va ishga tushadigan fayllar esa fayl turi bo‘yicha belgilanadi — ichidagi kod tahlil qilinmaydi. O‘chirish muvaffaqiyatli bo‘lgandan keyin guruhga yuboruvchi va sabab ko‘rsatilgan xabar yoziladi. Telegram Bot API xabarni faqat yuborilganidan keyingi 48 soat ichida o‘chirishga ruxsat beradi; bu bot xabarlarni kelishi bilan tekshiradi.
 
 ## O‘rnatish
 
