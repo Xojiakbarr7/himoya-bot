@@ -48,11 +48,12 @@ MAX_ALERT_TEXT = 3500
 WEBHOOK_PATH = "/telegram/webhook"
 BUTTON_STATUS = "📊 Bot holati"
 BUTTON_TIPS = "🔐 Xavfsizlik maslahatlari"
+BUTTON_SCAN = "🔎 Xabarni tekshirish"
 BUTTON_HELP = "ℹ️ Qanday ishlaydi"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
-        [BUTTON_HELP],
+        [BUTTON_SCAN, BUTTON_HELP],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -344,7 +345,7 @@ async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]
     elif command in {"/help", "/start_help"}:
         await send_text(session, chat_id,
             "🛡 <b>Qalqon AI</b>\n\n"
-            "Pastdagi tugmalar orqali bot holatini ko‘ring, xavfsizlik maslahatlarini oling yoki bot qanday ishlashini bilib oling.\n\n"
+            "Pastdagi tugmalar orqali bot holatini ko‘ring, xavfsizlik maslahatlarini oling, botni qo‘lda tekshiring yoki uning ishlashini bilib oling.\n\n"
             "Bot ruxsat berilgan shaxsiy chatlardagi havola, APK va firibgarlikka o‘xshash iboralarni belgilaydi. "
             "U faylni yuklab olmaydi va zararli ekanini tasdiqlamaydi.")
 
@@ -364,9 +365,40 @@ async def handle_keyboard_button(session: aiohttp.ClientSession, message: dict[s
             "Ogohlantirish xavf belgisi borligini bildiradi; bot faylni antivirus kabi tahlil qilmaydi.")
     elif text == BUTTON_HELP:
         await handle_command(session, {**message, "text": "/help"})
+    elif text == BUTTON_SCAN:
+        await send_text(session, chat_id,
+            "🔎 <b>Qo‘lda tekshirish</b>\n\n"
+            "Shubhali xabarni shu botga forward qiling yoki havola, xabar matni yoxud APK faylini yuboring.\n\n"
+            "Bot faqat ma’lum xavf belgilarini tekshiradi: havolani ochmaydi, faylni yuklab olmaydi va APK’ni antivirus kabi tahlil qilmaydi.")
     else:
         return False
     return True
+
+
+def is_manual_scan_input(message: dict[str, Any]) -> bool:
+    if message.get("document") or urls_from_message(message):
+        return True
+    body = f"{message.get('text') or ''} {message.get('caption') or ''}".lower()
+    return any(phrase in body for phrase in SUSPICIOUS_PHRASES)
+
+
+async def handle_manual_scan(session: aiohttp.ClientSession, message: dict[str, Any]) -> None:
+    if (message.get("chat") or {}).get("type") != "private" or not is_manual_scan_input(message):
+        return
+    result = analyze(message)
+    chat_id = int(message["chat"]["id"])
+    if result:
+        await api(session, "sendMessage", {
+            "chat_id": chat_id,
+            "text": "🔎 <b>Qo‘lda tekshiruv natijasi</b>\n\n" + alert_message(result),
+            "parse_mode": "HTML",
+            "reply_markup": alert_keyboard(result),
+            "disable_web_page_preview": True,
+        })
+    else:
+        await send_text(session, chat_id,
+            "✅ Belgilangan xavf alomatlari topilmadi. Bu xabar yoki fayl mutlaqo xavfsiz degani emas: "
+            "bot havolalarni ochmaydi va fayllarni antivirus kabi tekshirmaydi.")
 
 
 async def process_update(session: aiohttp.ClientSession, store: Store, update: dict[str, Any]) -> None:
@@ -376,7 +408,9 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         if text.startswith("/"):
             await handle_command(session, message)
         else:
-            await handle_keyboard_button(session, message)
+            handled = await handle_keyboard_button(session, message)
+            if not handled:
+                await handle_manual_scan(session, message)
         return
 
     if "business_connection" in update:
