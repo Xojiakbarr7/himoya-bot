@@ -220,7 +220,7 @@ def analyze(message: dict[str, Any]) -> dict[str, Any] | None:
             score = min(100, score + link_score)
             reasons.extend(link_reasons)
 
-    if score < 35:
+    if score < 35 and not link_results:
         return None
     sender = message.get("from") or {}
     sender_name = " ".join(part for part in (sender.get("first_name"), sender.get("last_name")) if part)
@@ -228,7 +228,11 @@ def analyze(message: dict[str, Any]) -> dict[str, Any] | None:
         sender_name = "Telegram foydalanuvchisi"
     return {
         "score": min(score, 100),
-        "level": "YUQORI XAVF" if score >= 70 else "SHUBHALI",
+        "level": (
+            "YUQORI XAVF" if score >= 70 else
+            "HAVOLA ESLATMASI" if score < 35 and link_results else
+            "SHUBHALI"
+        ),
         "reasons": list(dict.fromkeys(reasons)),
         "file_name": file_name if is_apk or file_name.lower().endswith((".exe", ".scr", ".msi", ".jar", ".bat", ".cmd")) else "",
         "links": link_results,
@@ -237,7 +241,11 @@ def analyze(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def alert_message(result: dict[str, Any]) -> str:
-    lines = [f"⚠️ <b>{result['level']}</b>", "Yangi xabarda xavf belgisi aniqlandi.", ""]
+    if result["level"] == "HAVOLA ESLATMASI":
+        intro = "Xabarda havola bor. Bot saytni ochmaydi va uning xavfsizligini tasdiqlamaydi."
+    else:
+        intro = "Yangi xabarda xavf belgisi aniqlandi."
+    lines = [f"⚠️ <b>{result['level']}</b>", intro, ""]
     lines.append(f"👤 Yuboruvchi: {html.escape(result['sender'])}")
     if result["file_name"]:
         lines.append(f"📎 Fayl: <code>{html.escape(result['file_name'])}</code>")
@@ -294,7 +302,7 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         if data.startswith("why:"):
             explanation = (
                 "APK belgisi fayl Android ilovasi ekanini bildiradi, uning ichida zararli kod borligini bot tasdiqlamagan. "
-                "Havola ogohlantirishi esa qisqartirilgan yoki soxta domenga o‘xshash belgi topilganini anglatadi."
+                "Havola eslatmasi xabarda link borligini bildiradi. Bot linkni ochmaydi; qisqartirilgan, IP yoki soxta domenga o‘xshash belgilar bo‘lsa alohida ko‘rsatadi."
             )
             await api(session, "sendMessage", {"chat_id": query["message"]["chat"]["id"], "text": explanation})
         elif data == "tips":
