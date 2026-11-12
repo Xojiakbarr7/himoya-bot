@@ -1,0 +1,431 @@
+"""Telegram Business security assistant.
+
+This starter monitors only business chats explicitly granted to the bot. It
+does not download files or send message contents to third-party services.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import html
+import ipaddress
+import logging
+import os
+import re
+import sqlite3
+import secrets
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+import aiohttp
+from aiohttp import web
+
+
+def load_dotenv(path: Path = Path(".env")) -> None:
+    """Load simple KEY=VALUE entries without requiring a dotenv dependency."""
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if value.startswith(("'", '"')) and value.endswith(value[:1]):
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+load_dotenv()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+DB_PATH = Path(os.environ.get("DATABASE_PATH", str(DATA_DIR / "himoya.sqlite3")))
+API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+POLL_TIMEOUT = 30
+MAX_ALERT_TEXT = 3500
+WEBHOOK_PATH = "/telegram/webhook"
+ALLOWED_UPDATES = [
+    "message", "business_connection", "business_message",
+    "edited_business_message", "callback_query",
+]
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("telegram_himoya")
+
+URL_RE = re.compile(r"(?i)(?:https?://|www\.)[^\s<>\]\[(){}\"']+|\bt\.me/[^\s<>\]\[(){}\"']+")
+TRAILING_URL_PUNCTUATION = ".,!?;:)]}>'\""
+SHORTENERS = {
+    "bit.ly", "tinyurl.com", "t.co", "is.gd", "cutt.ly", "rb.gy",
+    "tiny.cc", "shorturl.at", "soo.gd", "rebrand.ly", "ow.ly",
+}
+SUSPICIOUS_PHRASES = (
+    "sms kod", "telegram kodi", "tasdiqlash kodi", "kodni yubor",
+    "kodni ayt", "akkauntingiz blok", "akkaunt blok", "tezda to'lov",
+    "pul o'tkazing", "sovrin yutdingiz", "hisobingizni tasdiqlang",
+    "пароль", "код подтверждения", "отправьте код", "аккаунт заблок",
+    "переведите деньги", "вы выиграли", "подтвердите аккаунт",
+)
+
+
+class TelegramAPIError(RuntimeError):
+    pass
+
+
+class Store:
+    """Persist only connection routing and update offset, never message text."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(path)
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS connections ("
+            "connection_id TEXT PRIMARY KEY, owner_chat_id INTEGER NOT NULL, "
+            "owner_user_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1)"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        self.db.commit()
+
+    def save_connection(self, connection: dict[str, Any]) -> None:
+        connection_id = connection.get("id")
+        user = connection.get("user") or {}
+        owner_chat_id = connection.get("user_chat_id")
+        owner_user_id = user.get("id")
+        if not connection_id or not owner_chat_id or not owner_user_id:
+            log.warning("Business ulanishida egani aniqlash uchun ma'lumot yetarli emas")
+            return
+        enabled = int(bool(connection.get("is_enabled", True)))
+        self.db.execute(
+            "INSERT INTO connections(connection_id, owner_chat_id, owner_user_id, enabled) "
+            "VALUES(?,?,?,?) ON CONFLICT(connection_id) DO UPDATE SET "
+            "owner_chat_id=excluded.owner_chat_id, owner_user_id=excluded.owner_user_id, "
+            "enabled=excluded.enabled",
+            (str(connection_id), int(owner_chat_id), int(owner_user_id), enabled),
+        )
+        self.db.commit()
+
+    def connection(self, connection_id: str) -> tuple[int, int] | None:
+        row = self.db.execute(
+            "SELECT owner_chat_id, owner_user_id FROM connections "
+            "WHERE connection_id=? AND enabled=1", (connection_id,)
+        ).fetchone()
+        return (int(row[0]), int(row[1])) if row else None
+
+    def set_offset(self, offset: int) -> None:
+        self.db.execute(
+            "INSERT INTO state(key,value) VALUES('update_offset',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(offset),)
+        )
+        self.db.commit()
+
+    def offset(self) -> int | None:
+        row = self.db.execute("SELECT value FROM state WHERE key='update_offset'").fetchone()
+        return int(row[0]) if row else None
+
+
+def api_error_text(data: dict[str, Any]) -> str:
+    return f"Telegram API xatosi ({data.get('error_code', '?')}): {data.get('description', 'noma’lum xato')}"
+
+
+async def api(session: aiohttp.ClientSession, method: str, payload: dict[str, Any] | None = None) -> Any:
+    async with session.post(f"{API_BASE}/{method}", json=payload or {}) as response:
+        data = await response.json(content_type=None)
+    if not data.get("ok"):
+        raise TelegramAPIError(api_error_text(data))
+    return data.get("result")
+
+
+def urls_from_message(message: dict[str, Any]) -> list[str]:
+    text = message.get("text") or message.get("caption") or ""
+    found = {match.rstrip(TRAILING_URL_PUNCTUATION) for match in URL_RE.findall(text)}
+    for key in ("entities", "caption_entities"):
+        for entity in message.get(key) or []:
+            if entity.get("type") == "text_link" and entity.get("url"):
+                found.add(str(entity["url"]).rstrip(TRAILING_URL_PUNCTUATION))
+            elif entity.get("type") == "url":
+                # Telegram entity offsets and lengths use UTF-16 code units.
+                encoded = text.encode("utf-16-le")
+                start = int(entity.get("offset", 0)) * 2
+                end = start + int(entity.get("length", 0)) * 2
+                visible_url = encoded[start:end].decode("utf-16-le", errors="ignore")
+                if visible_url:
+                    found.add(visible_url.rstrip(TRAILING_URL_PUNCTUATION))
+    return sorted(url for url in found if url)
+
+
+def host_from_url(url: str) -> str:
+    normalized = url if "://" in url else f"https://{url}"
+    try:
+        host = (urlsplit(normalized).hostname or "").rstrip(".").lower()
+        return host.encode("idna").decode("ascii") if host else ""
+    except (ValueError, UnicodeError):
+        return ""
+
+
+def inspect_url(url: str) -> tuple[int, list[str], str]:
+    host = host_from_url(url)
+    reasons: list[str] = []
+    score = 0
+    if not host:
+        return 55, ["Havola manzilini to‘g‘ri aniqlab bo‘lmadi"], "noma’lum domen"
+    if host.startswith("xn--") or ".xn--" in host:
+        score += 45
+        reasons.append("Domen xalqaro/punycode yozuvidan foydalanadi")
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        score += 45
+        reasons.append("Havola domen o‘rniga IP manzilga olib boradi")
+    except ValueError:
+        pass
+    if host in SHORTENERS:
+        score += 35
+        reasons.append("Qisqartirilgan havola asl manzilni yashirishi mumkin")
+    if "telegram" in host and host not in {"telegram.org", "t.me", "telegram.me"} and not host.endswith(".telegram.org"):
+        score += 50
+        reasons.append("Domen Telegram nomiga o‘xshatib yozilgan bo‘lishi mumkin")
+    return min(score, 100), reasons, host
+
+
+def analyze(message: dict[str, Any]) -> dict[str, Any] | None:
+    reasons: list[str] = []
+    score = 0
+    document = message.get("document") or {}
+    file_name = str(document.get("file_name") or "")
+    mime = str(document.get("mime_type") or "").lower()
+    is_apk = file_name.lower().endswith(".apk") or mime == "application/vnd.android.package-archive"
+    if is_apk:
+        score = max(score, 85)
+        reasons.append("Android APK ilovasi yuborilgan; faylning xavfsizligi bu botda tekshirilmagan")
+    elif file_name.lower().endswith((".exe", ".scr", ".msi", ".jar", ".bat", ".cmd")):
+        score = max(score, 65)
+        reasons.append("Ishga tushiriladigan dastur fayli yuborilgan")
+
+    body = f"{message.get('text') or ''} {message.get('caption') or ''}".lower()
+    matched_phrases = [phrase for phrase in SUSPICIOUS_PHRASES if phrase in body]
+    if matched_phrases:
+        score = min(100, score + 35)
+        reasons.append("Xabarda kod, parol, pul yoki akkauntni shoshilinch tasdiqlashga undovchi ibora bor")
+
+    link_results = []
+    for url in urls_from_message(message):
+        link_score, link_reasons, host = inspect_url(url)
+        link_results.append({"host": host, "score": link_score, "reasons": link_reasons})
+        if link_score:
+            score = min(100, score + link_score)
+            reasons.extend(link_reasons)
+
+    if score < 35:
+        return None
+    sender = message.get("from") or {}
+    sender_name = " ".join(part for part in (sender.get("first_name"), sender.get("last_name")) if part)
+    if not sender_name:
+        sender_name = "Telegram foydalanuvchisi"
+    return {
+        "score": min(score, 100),
+        "level": "YUQORI XAVF" if score >= 70 else "SHUBHALI",
+        "reasons": list(dict.fromkeys(reasons)),
+        "file_name": file_name if is_apk or file_name.lower().endswith((".exe", ".scr", ".msi", ".jar", ".bat", ".cmd")) else "",
+        "links": link_results,
+        "sender": sender_name,
+    }
+
+
+def alert_message(result: dict[str, Any]) -> str:
+    lines = [f"⚠️ <b>{result['level']}</b>", "Yangi xabarda xavf belgisi aniqlandi.", ""]
+    lines.append(f"👤 Yuboruvchi: {html.escape(result['sender'])}")
+    if result["file_name"]:
+        lines.append(f"📎 Fayl: <code>{html.escape(result['file_name'])}</code>")
+    for link in result["links"][:3]:
+        lines.append(f"🔗 Domen: <code>{html.escape(link['host'])}</code>")
+    lines.append("\n<b>Sabab:</b>")
+    lines.extend(f"• {html.escape(reason)}" for reason in result["reasons"][:5])
+    lines.append("\nNoma’lum APK’ni o‘rnatmang, havolada Telegram kodi yoki parolni kiritmang.")
+    return "\n".join(lines)[:MAX_ALERT_TEXT]
+
+
+def alert_keyboard(result: dict[str, Any]) -> dict[str, Any]:
+    category = "apk" if result["file_name"].lower().endswith(".apk") else "link"
+    return {"inline_keyboard": [[
+        {"text": "Nega ogohlantirdi?", "callback_data": f"why:{category}"},
+        {"text": "Xavfsizlik maslahati", "callback_data": "tips"},
+    ]]}
+
+
+async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
+    await api(session, "sendMessage", {
+        "chat_id": chat_id,
+        "text": (
+            "🛡 <b>Telegram Himoya botiga xush kelibsiz!</b>\n\n"
+            "Men Telegram Business orqali ruxsat berilgan shaxsiy chatlardagi yangi xabarlarni tekshiraman. "
+            "APK, shubhali havola yoki firibgarlik iborasini topsam, shu yerga ogohlantirish yuboraman.\n\n"
+            "Ulash uchun Telegram sozlamalaridan <b>Telegram Business → Chatbots</b> bo‘limiga kiring, "
+            "ushbu botni tanlang va chatlarni o‘qish ruxsatini bering. Mavjud va yangi chatlar, "
+            "kontaktlar va kontakt bo‘lmaganlarni tanlang. BotFather’da bot uchun Business Mode ham yoqilgan bo‘lishi kerak.\n\n"
+            "Bot xabar matnlarini bazada saqlamaydi, fayllarni yuklab olmaydi va tashqi xizmatga yubormaydi."
+        ),
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    })
+
+
+async def process_update(session: aiohttp.ClientSession, store: Store, update: dict[str, Any]) -> None:
+    if "message" in update:
+        message = update["message"]
+        text = message.get("text", "")
+        if text.startswith("/start"):
+            await handle_start(session, int(message["chat"]["id"]))
+        return
+
+    if "business_connection" in update:
+        store.save_connection(update["business_connection"])
+        log.info("Business ulanish holati yangilandi")
+        return
+
+    if "callback_query" in update:
+        query = update["callback_query"]
+        data = query.get("data", "")
+        await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
+        if data.startswith("why:"):
+            explanation = (
+                "APK belgisi fayl Android ilovasi ekanini bildiradi, uning ichida zararli kod borligini bot tasdiqlamagan. "
+                "Havola ogohlantirishi esa qisqartirilgan yoki soxta domenga o‘xshash belgi topilganini anglatadi."
+            )
+            await api(session, "sendMessage", {"chat_id": query["message"]["chat"]["id"], "text": explanation})
+        elif data == "tips":
+            await api(session, "sendMessage", {
+                "chat_id": query["message"]["chat"]["id"],
+                "text": "Telegram login kodini hech kimga bermang. Noma’lum APK’ni o‘rnatmang. Havolani tekshirish uchun uni brauzerda ochmang — avval domen nomini sinchiklab ko‘ring.",
+            })
+        return
+
+    message = update.get("business_message") or update.get("edited_business_message")
+    if not message:
+        return
+    connection_id = message.get("business_connection_id")
+    if not connection_id:
+        return
+    connection = store.connection(str(connection_id))
+    if connection is None:
+        try:
+            info = await api(session, "getBusinessConnection", {"business_connection_id": connection_id})
+            store.save_connection(info)
+            connection = store.connection(str(connection_id))
+        except TelegramAPIError as exc:
+            log.warning("Business ulanish ma'lumotini olish imkoni bo‘lmadi: %s", exc)
+            return
+    if connection is None:
+        return
+    owner_chat_id, owner_user_id = connection
+
+    # The target is incoming personal messages only; ignore groups and messages sent by the owner.
+    if (message.get("chat") or {}).get("type") != "private":
+        return
+    sender_id = (message.get("from") or {}).get("id")
+    if sender_id == owner_user_id:
+        return
+
+    result = analyze(message)
+    if not result:
+        return
+    await api(session, "sendMessage", {
+        "chat_id": owner_chat_id,
+        "text": alert_message(result),
+        "parse_mode": "HTML",
+        "reply_markup": alert_keyboard(result),
+        "disable_web_page_preview": True,
+    })
+    log.info("Xavfsizlik ogohlantirishi yuborildi (%s)", result["level"])
+
+
+async def run_polling(session: aiohttp.ClientSession, store: Store) -> None:
+    # Local development mode. Render free uses webhooks below.
+    await api(session, "deleteWebhook", {"drop_pending_updates": False})
+    offset = store.offset()
+    while True:
+        try:
+            payload: dict[str, Any] = {"timeout": POLL_TIMEOUT, "allowed_updates": ALLOWED_UPDATES}
+            if offset is not None:
+                payload["offset"] = offset
+            updates = await api(session, "getUpdates", payload)
+            for update in updates:
+                try:
+                    await process_update(session, store, update)
+                except (TelegramAPIError, KeyError, TypeError, ValueError) as exc:
+                    log.warning("Yangilanishni qayta ishlashda xato: %s", exc)
+                offset = int(update["update_id"]) + 1
+                store.set_offset(offset)
+        except asyncio.CancelledError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError, TelegramAPIError) as exc:
+            log.warning("Telegram bilan aloqa uzildi; qayta uriniladi: %s", exc)
+            await asyncio.sleep(3)
+
+
+async def run_webhook(session: aiohttp.ClientSession, store: Store) -> None:
+    external_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+    secret = os.environ.get("WEBHOOK_SECRET", "").strip()
+    if not external_url.startswith("https://"):
+        raise SystemExit("Webhook rejimi uchun RENDER_EXTERNAL_URL (HTTPS) kerak.")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", secret):
+        raise SystemExit("WEBHOOK_SECRET 16-256 ta harf, raqam, _ yoki - bo‘lishi kerak.")
+
+    async def health(_: web.Request) -> web.Response:
+        return web.json_response({"ok": True})
+
+    async def webhook(request: web.Request) -> web.Response:
+        if not secrets.compare_digest(request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), secret):
+            raise web.HTTPForbidden()
+        try:
+            update = await request.json()
+            await process_update(session, store, update)
+        except (TelegramAPIError, KeyError, TypeError, ValueError, aiohttp.ClientError) as exc:
+            log.exception("Webhook yangilanishini qayta ishlashda xato: %s", exc)
+            raise web.HTTPInternalServerError(text="Update processing failed") from exc
+        return web.json_response({"ok": True})
+
+    app = web.Application(client_max_size=1024 * 1024)
+    app.router.add_get("/healthz", health)
+    app.router.add_post(WEBHOOK_PATH, webhook)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "10000")))
+    await site.start()
+    await api(session, "setWebhook", {
+        "url": f"{external_url}{WEBHOOK_PATH}",
+        "secret_token": secret,
+        "allowed_updates": ALLOWED_UPDATES,
+        "drop_pending_updates": False,
+    })
+    log.info("Webhook ishga tushdi: %s%s", external_url, WEBHOOK_PATH)
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
+
+
+async def run() -> None:
+    if not BOT_TOKEN:
+        raise SystemExit("BOT_TOKEN topilmadi. .env.example faylidan .env yarating va tokenni kiriting.")
+    store = Store(DB_PATH)
+    timeout = aiohttp.ClientTimeout(total=40, connect=15)
+    connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        me = await api(session, "getMe")
+        log.info("Bot ishga tushdi: @%s", me.get("username", "unknown"))
+        if os.environ.get("RENDER_EXTERNAL_URL"):
+            await run_webhook(session, store)
+        else:
+            await run_polling(session, store)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        log.info("Bot to‘xtatildi")

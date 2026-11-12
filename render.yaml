@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: telegram-himoya-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
