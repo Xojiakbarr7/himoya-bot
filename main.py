@@ -555,20 +555,9 @@ async def warn_recipient_about_suspicious_outgoing(
     if not chat_id or not message_id:
         return
 
-    file_name = result.get("file_name", "").lower()
-    if file_name.endswith(".apk"):
-        item = "APK fayl"
-    elif file_name:
-        item = "dastur fayli"
-    elif result.get("links"):
-        item = "havola"
-    else:
-        item = "shubhali matn"
     text = (
-        "⚠️ <b>XAVFSIZLIK OGOHLANTIRISHI</b>\n\n"
-        f"Ushbu xabarda {item} aniqlandi. Agar bu xabarni men yubormagan bo‘lsam, "
-        "akkauntimga begona kirgan bo‘lishi mumkin. Iltimos, havolani ochmang, "
-        "APK faylni yuklab olib o‘rnatmang. Men bilan boshqa ishonchli yo‘l orqali bog‘lanib aniqlashtiring."
+        "⚠️ <b>Ogohlantirish:</b> Bu APK yoki havolani ochmang. "
+        "Men yubormagan bo‘lishim mumkin — akkauntimga begona kirgan bo‘lishi ehtimol."
     )
     try:
         await api(session, "sendMessage", {
