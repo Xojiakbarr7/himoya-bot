@@ -50,10 +50,12 @@ BUTTON_STATUS = "📊 Bot holati"
 BUTTON_TIPS = "🔐 Xavfsizlik maslahatlari"
 BUTTON_SCAN = "🔎 Xabarni tekshirish"
 BUTTON_HELP = "ℹ️ Qanday ishlaydi"
+BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
         [BUTTON_SCAN, BUTTON_HELP],
+        [BUTTON_DELETE_MODE],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -111,6 +113,10 @@ class Store:
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS user_settings ("
+            "owner_user_id INTEGER PRIMARY KEY, auto_delete_harmful INTEGER NOT NULL DEFAULT 0)"
+        )
         self.db.commit()
 
     def save_connection(self, connection: dict[str, Any]) -> None:
@@ -137,6 +143,21 @@ class Store:
             "WHERE connection_id=? AND enabled=1", (connection_id,)
         ).fetchone()
         return (int(row[0]), int(row[1])) if row else None
+
+    def auto_delete_enabled(self, owner_user_id: int) -> bool:
+        row = self.db.execute(
+            "SELECT auto_delete_harmful FROM user_settings WHERE owner_user_id=?",
+            (int(owner_user_id),),
+        ).fetchone()
+        return bool(row[0]) if row else False
+
+    def set_auto_delete(self, owner_user_id: int, enabled: bool) -> None:
+        self.db.execute(
+            "INSERT INTO user_settings(owner_user_id, auto_delete_harmful) VALUES(?,?) "
+            "ON CONFLICT(owner_user_id) DO UPDATE SET auto_delete_harmful=excluded.auto_delete_harmful",
+            (int(owner_user_id), int(enabled)),
+        )
+        self.db.commit()
 
     def set_offset(self, offset: int) -> None:
         self.db.execute(
@@ -261,6 +282,22 @@ def analyze(message: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def business_deletion_reason(message: dict[str, Any], result: dict[str, Any]) -> str:
+    """Return a reason only for actionable harmful items, not ordinary links/text."""
+    document = message.get("document") or {}
+    file_name = str(document.get("file_name") or result.get("file_name") or "").lower()
+    mime = str(document.get("mime_type") or "").lower()
+    if file_name.endswith(".apk") or mime == "application/vnd.android.package-archive":
+        return "APK ilovasi"
+    if file_name.endswith(EXECUTABLE_SUFFIXES) or mime in {
+        "application/x-msdownload", "application/x-executable", "application/java-archive",
+    }:
+        return "ishga tushiriladigan fayl"
+    if any(int(link.get("score", 0)) >= 35 for link in result.get("links", [])):
+        return "shubhali yoki qisqartirilgan havola"
+    return ""
+
+
 def alert_message(result: dict[str, Any]) -> str:
     if result["level"] == "HAVOLA ESLATMASI":
         intro = "Xabarda havola bor. Bot saytni ochmaydi va uning xavfsizligini tasdiqlamaydi."
@@ -315,6 +352,37 @@ async def send_text(session: aiohttp.ClientSession, chat_id: int, text: str) -> 
     })
 
 
+def delete_mode_content(store: Store, owner_user_id: int) -> tuple[str, dict[str, Any]]:
+    enabled = store.auto_delete_enabled(owner_user_id)
+    status = "🟢 YOQILGAN" if enabled else "⚪ O‘CHIRILGAN"
+    text = (
+        f"🗑 <b>Zararli xabarlarni avtomatik o‘chirish: {status}</b>\n\n"
+        "Yoqilganda bot ruxsat berilgan shaxsiy chatlardan kelgan APK/dastur fayllarini "
+        "va aniq shubhali yoki qisqartirilgan havolalarni o‘chiradi, so‘ng sizga xabar beradi. "
+        "Oddiy havolalar o‘chirilmaydi.\n\n"
+        "Ishlashi uchun Telegram Business’da botga <b>qabul qilingan xabarlarni o‘chirish</b> "
+        "huquqini bering. APK faylni antivirus kabi tekshirmaydi."
+    )
+    keyboard = {"inline_keyboard": [[
+        {"text": "✅ Yoqish", "callback_data": "delete_mode:on"},
+        {"text": "⏸ O‘chirish", "callback_data": "delete_mode:off"},
+    ]]}
+    return text, keyboard
+
+
+async def send_delete_mode_menu(
+    session: aiohttp.ClientSession, store: Store, chat_id: int,
+) -> None:
+    text, keyboard = delete_mode_content(store, chat_id)
+    await api(session, "sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": keyboard,
+        "disable_web_page_preview": True,
+    })
+
+
 async def handle_status(session: aiohttp.ClientSession, chat_id: int) -> None:
     try:
         info = await api(session, "getWebhookInfo")
@@ -360,7 +428,9 @@ async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]
             "U faylni yuklab olmaydi va zararli ekanini tasdiqlamaydi.")
 
 
-async def handle_keyboard_button(session: aiohttp.ClientSession, message: dict[str, Any]) -> bool:
+async def handle_keyboard_button(
+    session: aiohttp.ClientSession, store: Store, message: dict[str, Any],
+) -> bool:
     text = str(message.get("text") or "").strip()
     chat_id = int(message["chat"]["id"])
     if text == BUTTON_STATUS:
@@ -380,6 +450,8 @@ async def handle_keyboard_button(session: aiohttp.ClientSession, message: dict[s
             "🔎 <b>Qo‘lda tekshirish</b>\n\n"
             "Shubhali xabarni shu botga forward qiling yoki havola, xabar matni yoxud APK faylini yuboring.\n\n"
             "Bot faqat ma’lum xavf belgilarini tekshiradi: havolani ochmaydi, faylni yuklab olmaydi va APK’ni antivirus kabi tahlil qilmaydi.")
+    elif text == BUTTON_DELETE_MODE:
+        await send_delete_mode_menu(session, store, chat_id)
     else:
         return False
     return True
@@ -515,6 +587,51 @@ async def warn_recipient_about_suspicious_outgoing(
         log.warning("Shubhali Business xabar ostiga ogohlantirish yuborilmadi: %s", exc)
 
 
+async def delete_incoming_business_message(
+    session: aiohttp.ClientSession, owner_chat_id: int, connection_id: str,
+    message: dict[str, Any], reason: str,
+) -> bool:
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if not chat_id or not message_id:
+        return False
+    try:
+        await api(session, "deleteBusinessMessages", {
+            "business_connection_id": connection_id,
+            "message_ids": [message_id],
+        })
+    except TelegramAPIError as exc:
+        log.warning("Business xabarini o‘chira olmadim: %s", exc)
+        try:
+            await send_text(
+                session,
+                owner_chat_id,
+                "⚠️ Xavfli xabar aniqlandi, lekin Telegram uni o‘chirishga ruxsat bermadi. "
+                "Telegram Business → Chatbots → Qalqon AI bo‘limida "
+                "<b>qabul qilingan xabarlarni o‘chirish</b> huquqini yoqing.",
+            )
+        except TelegramAPIError as notify_exc:
+            log.warning("O‘chirish huquqi haqida egaga xabar yuborilmadi: %s", notify_exc)
+        return False
+
+    sender = message.get("from") or {}
+    sender_name = " ".join(part for part in (sender.get("first_name"), sender.get("last_name")) if part)
+    username = str(sender.get("username") or "").strip()
+    sender_label = f"@{html.escape(username)}" if username else html.escape(sender_name or "Noma’lum foydalanuvchi")
+    try:
+        await send_text(
+            session,
+            owner_chat_id,
+            "🗑 <b>Xavfli xabar o‘chirildi.</b>\n\n"
+            f"Yuboruvchi: {sender_label}\nAniqlangan: {html.escape(reason)}\n\n"
+            "APK yoki havolani bot ochmadi va faylni yuklab olmadi.",
+        )
+    except TelegramAPIError as exc:
+        log.warning("O‘chirilgan xabar haqida egaga xabar yuborilmadi: %s", exc)
+    log.info("Xavfli Business xabari o‘chirildi (%s)", reason)
+    return True
+
+
 async def process_update(session: aiohttp.ClientSession, store: Store, update: dict[str, Any]) -> None:
     message = update.get("message") or update.get("edited_message")
     if message:
@@ -526,7 +643,7 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         if text.startswith("/"):
             await handle_command(session, message)
         else:
-            handled = await handle_keyboard_button(session, message)
+            handled = await handle_keyboard_button(session, store, message)
             if not handled:
                 await handle_manual_scan(session, message)
         return
@@ -539,6 +656,37 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if "callback_query" in update:
         query = update["callback_query"]
         data = query.get("data", "")
+        if data in {"delete_mode:on", "delete_mode:off"}:
+            callback_message = query.get("message") or {}
+            callback_chat = callback_message.get("chat") or {}
+            callback_user_id = int((query.get("from") or {}).get("id", 0))
+            callback_chat_id = int(callback_chat.get("id", 0))
+            if (
+                callback_chat.get("type") != "private"
+                or callback_user_id != callback_chat_id
+            ):
+                await api(session, "answerCallbackQuery", {
+                    "callback_query_id": query["id"],
+                    "text": "Sozlama faqat shaxsiy bot chatida o‘zgartiriladi.",
+                    "show_alert": True,
+                })
+                return
+            enabled = data == "delete_mode:on"
+            store.set_auto_delete(callback_user_id, enabled)
+            text, keyboard = delete_mode_content(store, callback_user_id)
+            await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
+            try:
+                await api(session, "editMessageText", {
+                    "chat_id": callback_chat_id,
+                    "message_id": callback_message.get("message_id"),
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "reply_markup": keyboard,
+                    "disable_web_page_preview": True,
+                })
+            except TelegramAPIError as exc:
+                log.warning("Avto o‘chirish sozlamasi xabarini yangilay olmadim: %s", exc)
+            return
         await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
         if data.startswith("why:"):
             explanation = (
@@ -589,6 +737,13 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
             session, message, str(connection_id), result
         )
         return
+
+    if store.auto_delete_enabled(owner_user_id):
+        reason = business_deletion_reason(message, result)
+        if reason and await delete_incoming_business_message(
+            session, owner_chat_id, str(connection_id), message, reason,
+        ):
+            return
 
     await api(session, "sendMessage", {
         "chat_id": owner_chat_id,
