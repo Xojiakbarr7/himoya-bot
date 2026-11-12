@@ -61,7 +61,7 @@ MAIN_KEYBOARD = {
 }
 ALLOWED_UPDATES = [
     "message", "business_connection", "business_message",
-    "edited_business_message", "callback_query",
+    "edited_business_message", "edited_message", "callback_query",
 ]
 
 logging.basicConfig(
@@ -83,6 +83,14 @@ SUSPICIOUS_PHRASES = (
     "пароль", "код подтверждения", "отправьте код", "аккаунт заблок",
     "переведите деньги", "вы выиграли", "подтвердите аккаунт",
 )
+GROUP_SCAM_PHRASES = (
+    "sms kod", "telegram kodi", "tasdiqlash kodi", "kodni yubor",
+    "kodni ayt", "akkauntingiz blok", "akkaunt blok", "tezda to'lov",
+    "pul o'tkazing", "sovrin yutdingiz", "hisobingizni tasdiqlang",
+    "отправьте код", "аккаунт заблок", "переведите деньги",
+    "вы выиграли", "подтвердите аккаунт",
+)
+EXECUTABLE_SUFFIXES = (".exe", ".scr", ".msi", ".jar", ".bat", ".cmd")
 
 
 class TelegramAPIError(RuntimeError):
@@ -401,9 +409,75 @@ async def handle_manual_scan(session: aiohttp.ClientSession, message: dict[str, 
             "bot havolalarni ochmaydi va fayllarni antivirus kabi tekshirmaydi.")
 
 
+def group_moderation_reason(message: dict[str, Any]) -> str:
+    document = message.get("document") or {}
+    file_name = str(document.get("file_name") or "").lower()
+    mime = str(document.get("mime_type") or "").lower()
+    if file_name.endswith(".apk") or mime == "application/vnd.android.package-archive":
+        return "APK fayl"
+    if file_name.endswith(EXECUTABLE_SUFFIXES) or mime in {
+        "application/x-msdownload", "application/x-executable", "application/java-archive",
+    }:
+        return "ishga tushiriladigan fayl"
+    if urls_from_message(message):
+        return "havola"
+    body = f"{message.get('text') or ''} {message.get('caption') or ''}".lower()
+    if any(phrase in body for phrase in GROUP_SCAM_PHRASES):
+        return "firibgarlikka o‘xshash matn"
+    return ""
+
+
+def group_sender_html(message: dict[str, Any]) -> str:
+    sender = message.get("from") or {}
+    username = str(sender.get("username") or "").strip()
+    if username:
+        return f"@{html.escape(username)}"
+    sender_id = sender.get("id")
+    name = " ".join(part for part in (sender.get("first_name"), sender.get("last_name")) if part)
+    if sender_id and name:
+        return f'<a href="tg://user?id={int(sender_id)}">{html.escape(name)}</a>'
+    sender_chat = message.get("sender_chat") or {}
+    if sender_chat.get("title"):
+        return html.escape(str(sender_chat["title"]))
+    return "Guruh a’zosi"
+
+
+async def moderate_group_message(session: aiohttp.ClientSession, message: dict[str, Any]) -> None:
+    reason = group_moderation_reason(message)
+    if not reason:
+        return
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        await api(session, "deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+    except TelegramAPIError as exc:
+        log.warning("Guruhdagi xabarni o‘chira olmadim (chat=%s, message=%s): %s", chat_id, message_id, exc)
+        return
+    notice = (
+        f"🛡 <b>Xabar o‘chirildi.</b>\n"
+        f"{group_sender_html(message)} guruhga {html.escape(reason)} yubordi."
+    )
+    try:
+        await api(session, "sendMessage", {
+            "chat_id": chat_id,
+            "text": notice,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        })
+    except TelegramAPIError as exc:
+        log.warning("Guruhga moderatsiya xabarini yubora olmadim (chat=%s): %s", chat_id, exc)
+
+
 async def process_update(session: aiohttp.ClientSession, store: Store, update: dict[str, Any]) -> None:
-    if "message" in update:
-        message = update["message"]
+    message = update.get("message") or update.get("edited_message")
+    if message:
+        chat_type = (message.get("chat") or {}).get("type")
+        if chat_type in {"group", "supergroup"}:
+            await moderate_group_message(session, message)
+            return
         text = str(message.get("text") or "")
         if text.startswith("/"):
             await handle_command(session, message)
