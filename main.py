@@ -52,12 +52,14 @@ BUTTON_SCAN = "🔎 Xabarni tekshirish"
 BUTTON_HELP = "ℹ️ Qanday ishlaydi"
 BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
 BUTTON_OUTGOING_WARNING = "⚠️ Yuborilgan xabar ogohlantirishi"
+BUTTON_UNKNOWN_SENDER = "👤 Yangi akkaunt ogohlantirishi"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
         [BUTTON_SCAN, BUTTON_HELP],
         [BUTTON_DELETE_MODE],
         [BUTTON_OUTGOING_WARNING],
+        [BUTTON_UNKNOWN_SENDER],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -118,13 +120,23 @@ class Store:
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS user_settings ("
             "owner_user_id INTEGER PRIMARY KEY, auto_delete_harmful INTEGER NOT NULL DEFAULT 0, "
-            "outgoing_warning INTEGER NOT NULL DEFAULT 0)"
+            "outgoing_warning INTEGER NOT NULL DEFAULT 0, unknown_sender_warning INTEGER NOT NULL DEFAULT 1)"
         )
         setting_columns = {row[1] for row in self.db.execute("PRAGMA table_info(user_settings)")}
         if "outgoing_warning" not in setting_columns:
             self.db.execute(
                 "ALTER TABLE user_settings ADD COLUMN outgoing_warning INTEGER NOT NULL DEFAULT 0"
             )
+        if "unknown_sender_warning" not in setting_columns:
+            self.db.execute(
+                "ALTER TABLE user_settings ADD COLUMN unknown_sender_warning INTEGER NOT NULL DEFAULT 1"
+            )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS sender_profiles ("
+            "owner_user_id INTEGER NOT NULL, sender_user_id INTEGER NOT NULL, "
+            "trusted INTEGER NOT NULL DEFAULT 0, foreign_number_alerted INTEGER NOT NULL DEFAULT 0, "
+            "PRIMARY KEY(owner_user_id, sender_user_id))"
+        )
         self.db.commit()
 
     def save_connection(self, connection: dict[str, Any]) -> None:
@@ -182,6 +194,57 @@ class Store:
         )
         self.db.commit()
 
+    def unknown_sender_warning_enabled(self, owner_user_id: int) -> bool:
+        row = self.db.execute(
+            "SELECT unknown_sender_warning FROM user_settings WHERE owner_user_id=?",
+            (int(owner_user_id),),
+        ).fetchone()
+        return bool(row[0]) if row else True
+
+    def set_unknown_sender_warning(self, owner_user_id: int, enabled: bool) -> None:
+        self.db.execute(
+            "INSERT INTO user_settings(owner_user_id, unknown_sender_warning) VALUES(?,?) "
+            "ON CONFLICT(owner_user_id) DO UPDATE SET unknown_sender_warning=excluded.unknown_sender_warning",
+            (int(owner_user_id), int(enabled)),
+        )
+        self.db.commit()
+
+    def observe_sender(self, owner_user_id: int, sender_user_id: int) -> tuple[bool, bool]:
+        cursor = self.db.execute(
+            "INSERT OR IGNORE INTO sender_profiles(owner_user_id, sender_user_id) VALUES(?,?)",
+            (int(owner_user_id), int(sender_user_id)),
+        )
+        self.db.commit()
+        row = self.db.execute(
+            "SELECT trusted FROM sender_profiles WHERE owner_user_id=? AND sender_user_id=?",
+            (int(owner_user_id), int(sender_user_id)),
+        ).fetchone()
+        return cursor.rowcount == 1, bool(row[0]) if row else False
+
+    def trust_sender(self, owner_user_id: int, sender_user_id: int) -> None:
+        self.db.execute(
+            "INSERT INTO sender_profiles(owner_user_id, sender_user_id, trusted) VALUES(?,?,1) "
+            "ON CONFLICT(owner_user_id, sender_user_id) DO UPDATE SET trusted=1",
+            (int(owner_user_id), int(sender_user_id)),
+        )
+        self.db.commit()
+
+    def mark_foreign_number_alerted(self, owner_user_id: int, sender_user_id: int) -> bool:
+        cursor = self.db.execute(
+            "UPDATE sender_profiles SET foreign_number_alerted=1 "
+            "WHERE owner_user_id=? AND sender_user_id=? AND foreign_number_alerted=0",
+            (int(owner_user_id), int(sender_user_id)),
+        )
+        self.db.commit()
+        return cursor.rowcount == 1
+
+    def foreign_number_alerted(self, owner_user_id: int, sender_user_id: int) -> bool:
+        row = self.db.execute(
+            "SELECT foreign_number_alerted FROM sender_profiles WHERE owner_user_id=? AND sender_user_id=?",
+            (int(owner_user_id), int(sender_user_id)),
+        ).fetchone()
+        return bool(row[0]) if row else False
+
     def set_offset(self, offset: int) -> None:
         self.db.execute(
             "INSERT INTO state(key,value) VALUES('update_offset',?) "
@@ -222,6 +285,51 @@ def urls_from_message(message: dict[str, Any]) -> list[str]:
                 if visible_url:
                     found.add(visible_url.rstrip(TRAILING_URL_PUNCTUATION))
     return sorted(url for url in found if url)
+
+
+def has_foreign_international_number(message: dict[str, Any]) -> bool:
+    """Detect an explicit international number other than +998 or +7."""
+    text = " ".join(str(message.get(key) or "") for key in ("text", "caption"))
+    contact = message.get("contact") or {}
+    if contact.get("phone_number"):
+        text += " " + str(contact["phone_number"])
+    for match in re.finditer(r"(?<!\w)\+\s*\d[\d\s().-]{5,24}", text):
+        digits = re.sub(r"\D", "", match.group())
+        if not 7 <= len(digits) <= 15:
+            continue
+        if digits.startswith(("998", "7")):
+            continue
+        return True
+    return False
+
+
+def sender_display(message: dict[str, Any]) -> str:
+    sender = message.get("from") or {}
+    username = str(sender.get("username") or "").strip()
+    if username:
+        return "@" + html.escape(username)
+    name = " ".join(part for part in (sender.get("first_name"), sender.get("last_name")) if part)
+    return html.escape(name or "Telegram foydalanuvchisi")
+
+
+def unknown_sender_alert(message: dict[str, Any], first_seen: bool, foreign_number: bool) -> str:
+    lines = ["👤 <b>Yangi yuboruvchidan xabar</b>", "", f"Yuboruvchi: {sender_display(message)}"]
+    if first_seen:
+        lines.append("Bot bu akkauntdan birinchi marta xabar oldi. Bu akkaunt yangi ochilganini anglatmaydi.")
+    if foreign_number:
+        lines.append(
+            "\n🌍 Xabarda +998 va +7 dan boshqa xalqaro telefon raqami ko‘rindi. "
+            "Bu yuboruvchining o‘z raqami ekanini anglatmaydi."
+        )
+    lines.append("\nShaxsni boshqa yo‘l bilan tekshirib oling.")
+    return "\n".join(lines)
+
+
+def trust_sender_keyboard(sender_user_id: int) -> dict[str, Any]:
+    return {"inline_keyboard": [[{
+        "text": "✅ Ishonchli deb belgilash",
+        "callback_data": f"trust_sender:{int(sender_user_id)}",
+    }]]}
 
 
 def host_from_url(url: str) -> str:
@@ -367,12 +475,14 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "• Ruxsat berilgan shaxsiy chatlardagi xavf belgilarini aniqlab, sizga ogohlantirish yuboradi.\n"
             "• <b>🗑 Avto o‘chirish sozlamasi</b> orqali APK/dastur fayllari va aniq shubhali havolalarni o‘chirishni o‘zingiz yoqasiz yoki o‘chirasiz.\n"
             "• <b>⚠️ Yuborilgan xabar ogohlantirishi</b> orqali akkauntingizdan APK yoki shubhali havola ketsa, oluvchiga ogohlantirish yozishni yoqasiz yoki o‘chirasiz.\n"
+            "• <b>👤 Yangi akkaunt ogohlantirishi</b> orqali bot birinchi marta yozgan yuboruvchini va xabardagi +998/+7 dan boshqa xalqaro raqamni bildiradi.\n"
             "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
             "<b>Qanday yoqiladi?</b>\n"
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
             "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>qabul qilingan xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
             "3. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
             "⚠️ Bot APK faylni antivirus kabi tekshirmaydi; xavf belgilariga qarab ogohlantiradi. Xabar matnlari bazada saqlanmaydi, fayllar yuklab olinmaydi."
+            " Telegram odatda yuboruvchining telefon raqamini botga ko‘rsatmaydi; faqat xabarda ochiq yozilgan yoki kontakt qilib yuborilgan raqam tekshiriladi."
         ),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
@@ -442,6 +552,37 @@ async def send_outgoing_warning_menu(
     session: aiohttp.ClientSession, store: Store, chat_id: int,
 ) -> None:
     text, keyboard = outgoing_warning_content(store, chat_id)
+    await api(session, "sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": keyboard,
+        "disable_web_page_preview": True,
+    })
+
+
+def unknown_sender_content(store: Store, owner_user_id: int) -> tuple[str, dict[str, Any]]:
+    enabled = store.unknown_sender_warning_enabled(owner_user_id)
+    status = "🟢 YOQILGAN" if enabled else "⚪ O‘CHIRILGAN"
+    text = (
+        f"👤 <b>Yangi yuboruvchi va xalqaro raqam ogohlantirishi: {status}</b>\n\n"
+        "Yoqilganda bot sizga birinchi marta yozgan shaxsiy chat yuboruvchisi haqida xabar beradi. "
+        "Bu Telegram akkaunti yaqinda ochilgan degani emas; bot uni faqat birinchi marta ko‘rmoqda.\n\n"
+        "Xabarda ochiq ko‘rsatilgan yoki kontakt sifatida yuborilgan +raqam aniqlansa, +998 va +7 dan "
+        "boshqa xalqaro raqamlar haqida ham bir marta xabar beradi. Bu raqam yuboruvchining o‘ziga tegishli "
+        "bo‘lishi shart emas. Telegram botga yuboruvchining odatda yashirin telefon raqamini bermaydi."
+    )
+    keyboard = {"inline_keyboard": [[
+        {"text": "✅ Yoqish", "callback_data": "unknown_sender:on"},
+        {"text": "⏸ O‘chirish", "callback_data": "unknown_sender:off"},
+    ]]}
+    return text, keyboard
+
+
+async def send_unknown_sender_menu(
+    session: aiohttp.ClientSession, store: Store, chat_id: int,
+) -> None:
+    text, keyboard = unknown_sender_content(store, chat_id)
     await api(session, "sendMessage", {
         "chat_id": chat_id,
         "text": text,
@@ -522,6 +663,8 @@ async def handle_keyboard_button(
         await send_delete_mode_menu(session, store, chat_id)
     elif text == BUTTON_OUTGOING_WARNING:
         await send_outgoing_warning_menu(session, store, chat_id)
+    elif text == BUTTON_UNKNOWN_SENDER:
+        await send_unknown_sender_menu(session, store, chat_id)
     else:
         return False
     return True
@@ -724,11 +867,48 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if "callback_query" in update:
         query = update["callback_query"]
         data = query.get("data", "")
+        if data.startswith("trust_sender:"):
+            callback_message = query.get("message") or {}
+            callback_chat = callback_message.get("chat") or {}
+            callback_user_id = int((query.get("from") or {}).get("id", 0))
+            callback_chat_id = int(callback_chat.get("id", 0))
+            try:
+                trusted_sender_id = int(data.split(":", 1)[1])
+            except ValueError:
+                trusted_sender_id = 0
+            if (
+                callback_chat.get("type") != "private"
+                or callback_user_id != callback_chat_id
+                or not trusted_sender_id
+            ):
+                await api(session, "answerCallbackQuery", {
+                    "callback_query_id": query["id"],
+                    "text": "Bu tugma faqat egasining shaxsiy chatida ishlaydi.",
+                    "show_alert": True,
+                })
+                return
+            store.trust_sender(callback_user_id, trusted_sender_id)
+            await api(session, "answerCallbackQuery", {
+                "callback_query_id": query["id"],
+                "text": "Yuboruvchi ishonchli deb belgilandi.",
+            })
+            try:
+                await api(session, "editMessageReplyMarkup", {
+                    "chat_id": callback_chat_id,
+                    "message_id": callback_message.get("message_id"),
+                    "reply_markup": {"inline_keyboard": []},
+                })
+            except TelegramAPIError as exc:
+                log.warning("Ishonchli yuboruvchi tugmasini olib tashlay olmadim: %s", exc)
+            await send_text(session, callback_chat_id, "✅ Yuboruvchi ishonchli deb belgilandi.")
+            return
         toggle_setting = None
         if data in {"delete_mode:on", "delete_mode:off"}:
             toggle_setting = "delete_mode"
         elif data in {"outgoing_warning:on", "outgoing_warning:off"}:
             toggle_setting = "outgoing_warning"
+        elif data in {"unknown_sender:on", "unknown_sender:off"}:
+            toggle_setting = "unknown_sender"
         if toggle_setting:
             callback_message = query.get("message") or {}
             callback_chat = callback_message.get("chat") or {}
@@ -749,6 +929,10 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
                 enabled = data == "outgoing_warning:on"
                 store.set_outgoing_warning(callback_user_id, enabled)
                 text, keyboard = outgoing_warning_content(store, callback_user_id)
+            elif toggle_setting == "unknown_sender":
+                enabled = data == "unknown_sender:on"
+                store.set_unknown_sender_warning(callback_user_id, enabled)
+                text, keyboard = unknown_sender_content(store, callback_user_id)
             else:
                 store.set_auto_delete(callback_user_id, enabled)
                 text, keyboard = delete_mode_content(store, callback_user_id)
@@ -806,6 +990,26 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     sender_id = (message.get("from") or {}).get("id")
     if message.get("sender_business_bot"):
         return
+
+    # Alert on first contact even when the message has no risky link or file.
+    # The sender ID is stored, but no message text or phone number is persisted.
+    if sender_id and sender_id != owner_user_id and store.unknown_sender_warning_enabled(owner_user_id):
+        first_seen, trusted = store.observe_sender(owner_user_id, int(sender_id))
+        foreign_number = has_foreign_international_number(message)
+        foreign_alert = foreign_number and store.mark_foreign_number_alerted(
+            owner_user_id, int(sender_id)
+        )
+        first_alert = first_seen and not trusted
+        if first_alert or foreign_alert:
+            alert_payload = {
+                "chat_id": owner_chat_id,
+                "text": unknown_sender_alert(message, first_alert, bool(foreign_alert)),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            if first_alert:
+                alert_payload["reply_markup"] = trust_sender_keyboard(int(sender_id))
+            await api(session, "sendMessage", alert_payload)
 
     result = analyze(message)
     if not result:
