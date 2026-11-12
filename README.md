@@ -11,6 +11,8 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Qisqartirilgan havola, IP-manzilli domen, punycode va Telegram nomiga o‘xshatilgan domenlarni mahalliy qoidalar bilan baholaydi.
 - Kod/parol so‘rash yoki shoshiltirishga o‘xshash ayrim o‘zbekcha/ruscha iboralarni aniqlaydi.
 - Xavf belgisi topilganda akkaunt egasining Telegram bot chatiga ogohlantirish yuboradi.
+- Pastki menyudagi **🗑 Avto o‘chirish sozlamasi** orqali foydalanuvchi Business shaxsiy chatlaridagi zararli xabarlarni avtomatik o‘chirishni yoqishi yoki o‘chirishi mumkin; standart holati o‘chiq.
+- Rejim yoqilganida APK/ishga tushiriladigan fayllar hamda aniq shubhali yoki qisqartirilgan havolalar o‘chiriladi. Oddiy havolalar va matnli ogohlantirish iboralari avtomatik o‘chirilmaydi. O‘chirilgan xabar haqida egasiga bot orqali xabar boradi.
 - Egasi akkauntidan APK, havola yoki shubhali ibora yuborilsa, o‘sha xabar ostiga javob qilib oluvchini ogohlantiradi. Oddiy xabarlarning ostiga ogohlantirish qo‘shmaydi.
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
 - Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; xabarlarni saqlamaydi.
@@ -23,7 +25,9 @@ Bu versiya to‘liq antivirus emas. APK faylni **zararli** deb tasdiqlamaydi; un
 
 Bot faqat foydalanuvchi Telegram Business’da unga ochib bergan chatlardagi va ulanishdan keyin kelgan xabarlarni oladi. Chat tanlashda mavjud/yangi chatlar hamda kontaktlar/kontakt bo‘lmaganlarni tanlang. Maxfiy chatlar va ruxsat berilmagan suhbatlar botga kelmaydi. BotFather sozlamalarida Business Mode yoqilgan bo‘lishi kerak.
 
-Egasi yuborgan shubhali xabar ostiga oluvchiga javob yozish uchun Telegram Business’da botga xabarlarni o‘qish bilan birga **Reply / Javob berish** huquqini ham bering. Telegram bu javobni ayrim shaxsiy chatlarda, yaqinda kiruvchi xabar bo‘lganida va ulanish ruxsatlari yetarli bo‘lganda qabul qiladi. Huquq yoki Telegram cheklovi bo‘lsa, ogohlantirish yuborilmasligi mumkin. Bot shubhali belgilarni taxminiy aniqlaydi; APK’ni antivirus kabi tekshirmaydi.
+Egasi yuborgan shubhali xabar ostiga oluvchiga javob yozish Telegram Business ruxsati va chat cheklovlariga bog‘liq; Telegram ayrim chatlarda yuborishni rad etishi mumkin. Avto o‘chirish rejimi esa faqat **qabul qilingan xabarlarni o‘chirish** huquqi berilganida ishlaydi. Bot shubhali belgilarni taxminiy aniqlaydi; APK’ni antivirus kabi tekshirmaydi.
+
+Shaxsiy chatlarda avto o‘chirishni yoqish uchun botda **🗑 Avto o‘chirish sozlamasi → ✅ Yoqish** tugmasini bosing. Telegram Business → Chatbots sozlamasida **qabul qilingan xabarlarni o‘chirish** huquqini yoqing. Huquq berilmasa, bot xabarni o‘chira olmaydi va sizga ruxsat yetishmayotgani haqida xabar beradi. Bu sozlama guruh moderatsiyasiga ta’sir qilmaydi.
 
 ### Guruh moderatsiyasi
 
@@ -47,7 +51,7 @@ BotFather’da bot uchun guruhlarga qo‘shishga ruxsat bering (**Allow Groups**
    ```
 
 5. Telegram’da botni ochib `/start` bosing.
-6. Telegram **Sozlamalar → Telegram Business → Chatbots** bo‘limida botni ulang. Barcha mavjud va yangi shaxsiy chatlar, kontaktlar va kontakt bo‘lmaganlarni tanlang; xabarlarni o‘qish ruxsatini bering.
+6. Telegram **Sozlamalar → Telegram Business → Chatbots** bo‘limida botni ulang. Kerakli shaxsiy chatlarni tanlang; xabarlarni o‘qish va avto o‘chirishni ishlatmoqchi bo‘lsangiz, qabul qilingan xabarlarni o‘chirish ruxsatini bering.
 
 Ulangandan so‘ng Telegram Business botga yangi xabarlar haqida `business_message` yangilanishlarini yuboradi. Render’da bot webhook orqali, kompyuterda ishga tushirganda esa long polling orqali oladi.
 
@@ -63,4 +67,4 @@ Render bepul rejasi doim uyg‘oq ishlash kafolatini bermaydi. Telegram webhook 
 
 ## Ruxsatlar
 
-Kerakli ruxsatlar — ruxsat berilgan chatlardagi xabarlarni o‘qish, biznes ulanish yangilanishlarini olish va shubhali xabarga javob berish. Javob huquqi oddiy xabarlarni jo‘natish uchun ishlatilmaydi; faqat xavf belgisi topilgan egasi yuborgan xabar ostiga ogohlantirish qo‘yiladi.
+Avto o‘chirish uchun Telegram Business’dagi `can_delete_received_messages` huquqi kerak. O‘chirish sozlamasi foydalanuvchi tanloviga ko‘ra saqlanadi va standart holatda o‘chiq turadi. Render bepul servisining fayl tizimi doimiy emasligi sabab qayta deploydan keyin sozlamani yana tekshirib, kerak bo‘lsa qayta yoqing.
