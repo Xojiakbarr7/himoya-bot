@@ -46,6 +46,18 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 POLL_TIMEOUT = 30
 MAX_ALERT_TEXT = 3500
 WEBHOOK_PATH = "/telegram/webhook"
+BUTTON_STATUS = "📊 Bot holati"
+BUTTON_TIPS = "🔐 Xavfsizlik maslahatlari"
+BUTTON_HELP = "ℹ️ Qanday ishlaydi"
+MAIN_KEYBOARD = {
+    "keyboard": [
+        [BUTTON_STATUS, BUTTON_TIPS],
+        [BUTTON_HELP],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+    "input_field_placeholder": "Tugmalardan birini tanlang",
+}
 ALLOWED_UPDATES = [
     "message", "business_connection", "business_message",
     "edited_business_message", "callback_query",
@@ -279,6 +291,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
         ),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
+        "reply_markup": MAIN_KEYBOARD,
     })
 
 
@@ -288,6 +301,7 @@ async def send_text(session: aiohttp.ClientSession, chat_id: int, text: str) -> 
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
+        "reply_markup": MAIN_KEYBOARD,
     })
 
 
@@ -329,12 +343,30 @@ async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]
             "Ogohlantirish xavfni bildiruvchi belgi; bot faylni antivirus kabi tahlil qilmaydi.")
     elif command in {"/help", "/start_help"}:
         await send_text(session, chat_id,
-            "🛡 <b>Qalqon AI buyruqlari</b>\n\n"
-            "/status — server va webhook holatini ko‘rish\n"
-            "/tips — akkauntni himoyalash bo‘yicha maslahatlar\n"
-            "/help — buyruqlar ro‘yxati\n\n"
+            "🛡 <b>Qalqon AI</b>\n\n"
+            "Pastdagi tugmalar orqali bot holatini ko‘ring, xavfsizlik maslahatlarini oling yoki bot qanday ishlashini bilib oling.\n\n"
             "Bot ruxsat berilgan shaxsiy chatlardagi havola, APK va firibgarlikka o‘xshash iboralarni belgilaydi. "
             "U faylni yuklab olmaydi va zararli ekanini tasdiqlamaydi.")
+
+
+async def handle_keyboard_button(session: aiohttp.ClientSession, message: dict[str, Any]) -> bool:
+    text = str(message.get("text") or "").strip()
+    chat_id = int(message["chat"]["id"])
+    if text == BUTTON_STATUS:
+        await handle_status(session, chat_id)
+    elif text == BUTTON_TIPS:
+        await send_text(session, chat_id,
+            "🔐 <b>Xavfsizlik maslahatlari</b>\n\n"
+            "• Telegram login kodi va parolingizni hech kimga bermang.\n"
+            "• Tanish bo‘lmagan odam yuborgan APK’ni o‘rnatmang.\n"
+            "• Havola domenini tekshirmasdan ochmang va kod kiritmang.\n"
+            "• Ikki bosqichli tasdiqlashni Telegram sozlamalarida yoqing.\n\n"
+            "Ogohlantirish xavf belgisi borligini bildiradi; bot faylni antivirus kabi tahlil qilmaydi.")
+    elif text == BUTTON_HELP:
+        await handle_command(session, {**message, "text": "/help"})
+    else:
+        return False
+    return True
 
 
 async def process_update(session: aiohttp.ClientSession, store: Store, update: dict[str, Any]) -> None:
@@ -343,6 +375,8 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         text = str(message.get("text") or "")
         if text.startswith("/"):
             await handle_command(session, message)
+        else:
+            await handle_keyboard_button(session, message)
         return
 
     if "business_connection" in update:
@@ -482,14 +516,9 @@ async def run() -> None:
         me = await api(session, "getMe")
         log.info("Bot ishga tushdi: @%s", me.get("username", "unknown"))
         try:
-            await api(session, "setMyCommands", {"commands": [
-                {"command": "start", "description": "Botni boshlash"},
-                {"command": "status", "description": "Server va webhook holati"},
-                {"command": "tips", "description": "Xavfsizlik maslahatlari"},
-                {"command": "help", "description": "Yordam va buyruqlar"},
-            ]})
+            await api(session, "deleteMyCommands")
         except TelegramAPIError as exc:
-            log.warning("Bot buyruqlarini yangilash imkoni bo‘lmadi: %s", exc)
+            log.warning("Bot menyusidagi eski buyruqlarni tozalash imkoni bo‘lmadi: %s", exc)
         if os.environ.get("RENDER_EXTERNAL_URL"):
             await run_webhook(session, store)
         else:
