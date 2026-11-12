@@ -483,7 +483,15 @@ async def warn_recipient_about_suspicious_outgoing(
     if not chat_id or not message_id:
         return
 
-    item = "APK fayl" if result.get("file_name", "").lower().endswith(".apk") else "shubhali havola yoki matn"
+    file_name = result.get("file_name", "").lower()
+    if file_name.endswith(".apk"):
+        item = "APK fayl"
+    elif file_name:
+        item = "dastur fayli"
+    elif result.get("links"):
+        item = "havola"
+    else:
+        item = "shubhali matn"
     text = (
         "⚠️ <b>XAVFSIZLIK OGOHLANTIRISHI</b>\n\n"
         f"Ushbu xabarda {item} aniqlandi. Agar bu xabarni men yubormagan bo‘lsam, "
