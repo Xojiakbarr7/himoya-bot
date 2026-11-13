@@ -223,7 +223,7 @@ class PostgresMessageHistory:
 
     def _execute(self, statements):
         try:
-            with self.driver.connect(self.url, connect_timeout=5, sslmode="require", options="-c statement_timeout=5000") as connection:
+            with self.driver.connect(self.url, connect_timeout=30, sslmode="require", options="-c statement_timeout=10000") as connection:
                 result = []
                 for sql, values in statements:
                     cursor = connection.execute(sql, values)
@@ -1660,8 +1660,12 @@ async def run() -> None:
     global DELETED_HISTORY
     history_url = os.environ.get("HISTORY_DATABASE_URL", "").strip()
     if history_url:
-        DELETED_HISTORY = PostgresMessageHistory(history_url)
-        log.info("History storage: PostgreSQL connected; schema and cleanup verified")
+        try:
+            DELETED_HISTORY = PostgresMessageHistory(history_url)
+            log.info("History storage: PostgreSQL connected; schema and cleanup verified")
+        except TelegramTemporaryError:
+            DELETED_HISTORY = TemporaryMessageHistory()
+            log.error("History storage: PostgreSQL unavailable at startup; bot continues in RAM-only mode")
     else:
         log.warning("History storage: RAM only; HISTORY_DATABASE_URL is not configured")
     if not re.fullmatch(r"[0-9]{6,}:[A-Za-z0-9_-]{20,}", BOT_TOKEN):
