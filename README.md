@@ -66,10 +66,16 @@ Botni doimiy ishlatish uchun pullik worker kerak bo‘ladi. Bepul Render web ser
 
 ### Render
 
-Loyihada bepul Render web service uchun Blueprint (`render.yaml`) bor. GitHub repoga yuklangach, Render Dashboard’dan shu repoga Blueprint ulang. `BOT_TOKEN` va `WEBHOOK_SECRET` qiymatlarini maxfiy environment variable sifatida kiriting; `.env` faylini repoga joylamang. Render `RENDER_EXTERNAL_URL` va `PORT` qiymatlarini beradi, bot webhook’ni o‘zi sozlaydi. `WEBHOOK_SECRET` uchun terminalda `python -c "import secrets; print(secrets.token_urlsafe(32))"` buyrug‘i bilan tasodifiy qiymat yarating.
+Loyihada bepul Render web service uchun Blueprint (`render.yaml`) bor. GitHub repoga yuklangach, Render Dashboard’dan shu repoga Blueprint ulang. `BOT_TOKEN` va `WEBHOOK_SECRET` qiymatlarini maxfiy environment variable sifatida kiriting; `.env` faylini repoga joylamang. Render `RENDER_EXTERNAL_URL` va `PORT` qiymatlarini beradi, bot webhook’ni o‘zi sozlaydi. `WEBHOOK_SECRET` uchun terminalda `python -c "import secrets; print(secrets.token_urlsafe(48))"` buyrug‘i bilan tasodifiy qiymat yarating.
 
 Render bepul rejasi doim uyg‘oq ishlash kafolatini bermaydi. Telegram webhook muvaffaqiyatsiz HTTP javobidan keyin yangilanishni bir necha bor qayta yuboradi, ammo Telegram ma’lum urinishlardan keyin yuborishni to‘xtatishi mumkin. Shu sabab bu sozlama bepul sinov va shaxsiy foydalanish uchun; xabarlarni darhol ogohlantirish zarur bo‘lsa, doimiy ishlaydigan pullik hosting tanlang.
 
 ## Ruxsatlar
 
 Avto o‘chirish uchun Telegram Business’dagi `can_delete_all_messages`, yuborilgan xabar ogohlantirishi uchun `can_reply` huquqi kerak. Ikkala sozlama ham foydalanuvchi tanloviga ko‘ra saqlanadi va standart holatda o‘chiq turadi. Render bepul servisining fayl tizimi doimiy emasligi sabab qayta deploydan keyin sozlamalarni yana tekshirib, kerak bo‘lsa qayta yoqing.
+
+## Xavfsizlik
+
+Webhook autentifikatsiyasi, kiruvchi ma’lumot tekshiruvi, takrorlarni bloklash, shaxsiy spam cheklovi va maxfiy log formati qo‘shilgan. To‘liq amaliy ko‘rsatma va hosting cheklovlari: [SECURITY.md](SECURITY.md).
+
+Sinov: `python -m unittest -v test_security`.

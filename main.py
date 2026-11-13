@@ -7,13 +7,16 @@ does not download files or send message contents to third-party services.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict, deque
 import html
 import ipaddress
+import json
 import logging
 import os
 import re
 import sqlite3
 import secrets
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -38,6 +41,7 @@ def load_dotenv(path: Path = Path(".env")) -> None:
             os.environ.setdefault(key, value)
 
 
+os.umask(0o077)
 load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -46,6 +50,8 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 POLL_TIMEOUT = 30
 MAX_ALERT_TEXT = 3500
 WEBHOOK_PATH = "/telegram/webhook"
+MAX_WEBHOOK_BYTES = 262144
+MAX_PENDING_UPDATES = 32
 BUTTON_STATUS = "📊 Bot holati"
 BUTTON_TIPS = "🔐 Xavfsizlik maslahatlari"
 BUTTON_SCAN = "🔎 Xabarni tekshirish"
@@ -76,6 +82,48 @@ logging.basicConfig(
 )
 log = logging.getLogger("telegram_himoya")
 
+
+def redact_secrets(text: str) -> str:
+    for value in (BOT_TOKEN, os.environ.get("WEBHOOK_SECRET", "")):
+        if value:
+            text = text.replace(value, "[REDACTED]")
+    return re.sub(r"(?<![0-9])[0-9]{6,}:[A-Za-z0-9_-]{20,}", "[REDACTED]", text)
+
+
+class SafeLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_secrets(super().format(record))
+
+
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(SafeLogFormatter("%(asctime)s %(levelname)s %(message)s"))
+
+
+class InteractionLimiter:
+    """Bound memory and limit direct bot commands; never drop Business protection updates."""
+
+    def __init__(self, capacity: int = 20, period: float = 60, max_keys: int = 10000) -> None:
+        self.capacity, self.period, self.max_keys = capacity, period, max_keys
+        self.entries: OrderedDict[tuple[str, int], deque[float]] = OrderedDict()
+
+    def allow(self, key: tuple[str, int]) -> bool:
+        now = time.monotonic()
+        while self.entries and next(iter(self.entries.values()))[-1] <= now - self.period:
+            self.entries.popitem(last=False)
+        events = self.entries.pop(key, deque())
+        while events and events[0] <= now - self.period:
+            events.popleft()
+        allowed = len(events) < self.capacity
+        if allowed:
+            events.append(now)
+        self.entries[key] = events
+        while len(self.entries) > self.max_keys:
+            self.entries.popitem(last=False)
+        return allowed
+
+
+PRIVATE_LIMITER = InteractionLimiter()
+
 URL_RE = re.compile(r"(?i)(?:https?://|www\.)[^\s<>\]\[(){}\"']+|\bt\.me/[^\s<>\]\[(){}\"']+")
 TRAILING_URL_PUNCTUATION = ".,!?;:)]}>'\""
 SHORTENERS = {
@@ -103,12 +151,26 @@ class TelegramAPIError(RuntimeError):
     pass
 
 
+class TelegramTemporaryError(TelegramAPIError):
+    """Transport/rate-limit failures must remain retryable by Telegram."""
+
+
 class Store:
     """Persist only connection routing and update offset, never message text."""
 
     def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(path)
+        path.chmod(0o600)
+        self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA trusted_schema=OFF")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS processed_updates ("
+            "update_id INTEGER PRIMARY KEY, processed_at INTEGER NOT NULL)"
+        )
+        self.db.execute("CREATE INDEX IF NOT EXISTS processed_updates_age ON processed_updates(processed_at)")
+        self.db.execute("DELETE FROM processed_updates WHERE processed_at < ?", (int(time.time()) - 172800,))
+        self._processed_since_cleanup = 0
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS connections ("
             "connection_id TEXT PRIMARY KEY, owner_chat_id INTEGER NOT NULL, "
@@ -147,7 +209,12 @@ class Store:
         if not connection_id or not owner_chat_id or not owner_user_id:
             log.warning("Business ulanishida egani aniqlash uchun ma'lumot yetarli emas")
             return
-        enabled = int(bool(connection.get("is_enabled", True)))
+        enabled = int(bool(connection.get("is_enabled", False)))
+        if enabled:
+            self.db.execute(
+                "UPDATE connections SET enabled=0 WHERE owner_user_id=? AND connection_id<>?",
+                (int(owner_user_id), str(connection_id)),
+            )
         self.db.execute(
             "INSERT INTO connections(connection_id, owner_chat_id, owner_user_id, enabled) "
             "VALUES(?,?,?,?) ON CONFLICT(connection_id) DO UPDATE SET "
@@ -259,18 +326,52 @@ class Store:
         )
         self.db.commit()
 
+    def update_processed(self, update_id: int) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM processed_updates WHERE update_id=?", (update_id,)
+        ).fetchone() is not None
+
+    def mark_update_processed(self, update_id: int) -> None:
+        self.db.execute(
+            "INSERT OR IGNORE INTO processed_updates VALUES(?,?)", (update_id, int(time.time())),
+        )
+        self._processed_since_cleanup += 1
+        if self._processed_since_cleanup >= 128:
+            self.db.execute("DELETE FROM processed_updates WHERE processed_at < ?", (int(time.time()) - 172800,))
+            self._processed_since_cleanup = 0
+        self.db.commit()
+
     def offset(self) -> int | None:
         row = self.db.execute("SELECT value FROM state WHERE key='update_offset'").fetchone()
         return int(row[0]) if row else None
 
 
 def api_error_text(data: dict[str, Any]) -> str:
-    return f"Telegram API xatosi ({data.get('error_code', '?')}): {data.get('description', 'noma’lum xato')}"
+    description = redact_secrets(str(data.get("description", "noma’lum xato")))
+    description = " ".join(description.split())[:250]
+    return f"Telegram API xatosi ({data.get('error_code', '?')}): {description}"
 
 
 async def api(session: aiohttp.ClientSession, method: str, payload: dict[str, Any] | None = None) -> Any:
-    async with session.post(f"{API_BASE}/{method}", json=payload or {}) as response:
-        data = await response.json(content_type=None)
+    if not re.fullmatch(r"[A-Za-z]+", method):
+        raise TelegramAPIError("Telegram API metodi noto‘g‘ri")
+    try:
+        async with session.post(f"{API_BASE}/{method}", json=payload or {}, allow_redirects=False) as response:
+            if response.status == 429 or response.status >= 500:
+                raise TelegramTemporaryError(f"Telegram vaqtinchalik xatosi ({response.status})")
+            if 300 <= response.status < 400:
+                raise TelegramAPIError("Telegram API kutilmagan yo‘naltirish qaytardi")
+            body = bytearray()
+            async for chunk in response.content.iter_chunked(65536):
+                body.extend(chunk)
+                if len(body) > 2097152:
+                    raise TelegramAPIError("Telegram API javobi juda katta")
+            data = json.loads(body)
+            if not isinstance(data, dict):
+                raise TelegramAPIError("Telegram API javobi noto‘g‘ri")
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, UnicodeError) as exc:
+        # Network exception strings can contain the bot-token-bearing request URL.
+        raise TelegramTemporaryError(f"Telegram bilan aloqa xatosi ({type(exc).__name__})") from None
     if not data.get("ok"):
         raise TelegramAPIError(api_error_text(data))
     return data.get("result")
@@ -443,15 +544,16 @@ def alert_message(result: dict[str, Any]) -> str:
     else:
         intro = "Yangi xabarda xavf belgisi aniqlandi."
     lines = [f"⚠️ <b>{result['level']}</b>", intro, ""]
-    lines.append(f"👤 Yuboruvchi: {html.escape(result['sender'])}")
+    lines.append(f"👤 Yuboruvchi: {html.escape(result['sender'][:128])}")
     if result["file_name"]:
-        lines.append(f"📎 Fayl: <code>{html.escape(result['file_name'])}</code>")
+        lines.append(f"📎 Fayl: <code>{html.escape(result['file_name'][:256])}</code>")
     for link in result["links"][:3]:
-        lines.append(f"🔗 Domen: <code>{html.escape(link['host'])}</code>")
+        lines.append(f"🔗 Domen: <code>{html.escape(link['host'][:253])}</code>")
     lines.append("\n<b>Sabab:</b>")
-    lines.extend(f"• {html.escape(reason)}" for reason in result["reasons"][:5])
+    lines.extend(f"• {html.escape(reason[:256])}" for reason in result["reasons"][:5])
     lines.append("\nNoma’lum APK’ni o‘rnatmang, havolada Telegram kodi yoki parolni kiritmang.")
-    return "\n".join(lines)[:MAX_ALERT_TEXT]
+    # Bound visible fields before escaping; slicing HTML can break tags/entities.
+    return "\n".join(lines)
 
 
 def alert_keyboard(result: dict[str, Any]) -> dict[str, Any]:
@@ -540,6 +642,8 @@ async def check_delete_permission(
         connection = await api(session, "getBusinessConnection", {"business_connection_id": connection_id})
         store.save_connection(connection)
     except TelegramAPIError as exc:
+        if isinstance(exc, TelegramTemporaryError):
+            raise
         log.warning("O‘chirish ruxsatini tekshira olmadim: %s", exc)
         return False, "⚠️ Ulanish ruxsatini tekshirib bo‘lmadi. Telegram Business’da botni qayta ulang."
     if not connection.get("is_enabled"):
@@ -625,9 +729,11 @@ async def handle_status(session: aiohttp.ClientSession, chat_id: int) -> None:
         lines.append(f"Navbatdagi yangilanishlar: {pending}")
         last_error = str(info.get("last_error_message") or "").strip()
         if last_error:
-            lines.append(f"Oxirgi webhook xatosi: {html.escape(last_error[:400])}")
+            lines.append("⚠️ Telegram webhook yetkazishda xato qayd etgan. Server holatini tekshirish kerak.")
         await send_text(session, chat_id, "\n".join(lines))
     except TelegramAPIError as exc:
+        if isinstance(exc, TelegramTemporaryError):
+            raise
         log.warning("Webhook holatini olishda xato: %s", exc)
         await send_text(session, chat_id, "Holatni tekshirib bo‘lmadi. Birozdan keyin /status ni qayta yuboring.")
 
@@ -761,6 +867,8 @@ async def moderate_group_message(session: aiohttp.ClientSession, message: dict[s
     try:
         await api(session, "deleteMessage", {"chat_id": chat_id, "message_id": message_id})
     except TelegramAPIError as exc:
+        if isinstance(exc, TelegramTemporaryError):
+            raise
         log.warning("Guruhdagi xabarni o‘chira olmadim (chat=%s, message=%s): %s", chat_id, message_id, exc)
         return
     notice = (
@@ -775,6 +883,8 @@ async def moderate_group_message(session: aiohttp.ClientSession, message: dict[s
             "disable_web_page_preview": True,
         })
     except TelegramAPIError as exc:
+        if isinstance(exc, TelegramTemporaryError):
+            raise
         log.warning("Guruhga moderatsiya xabarini yubora olmadim (chat=%s): %s", chat_id, exc)
 
 
@@ -806,6 +916,8 @@ async def warn_recipient_about_suspicious_outgoing(
         })
         log.info("Shubhali outgoing xabarga Business ogohlantirishi javob qilindi")
     except TelegramAPIError as exc:
+        if isinstance(exc, TelegramTemporaryError):
+            raise
         log.warning("Shubhali Business xabar ostiga ogohlantirish yuborilmadi: %s", exc)
         try:
             await send_text(
@@ -815,6 +927,8 @@ async def warn_recipient_about_suspicious_outgoing(
                 "Telegram Business sozlamalarida <b>Javob berish</b> huquqini tekshiring; ayrim chatlarda bu funksiya cheklangan.",
             )
         except TelegramAPIError as notify_exc:
+            if isinstance(notify_exc, TelegramTemporaryError):
+                raise
             log.warning("Ogohlantirish yuborilmagani haqida egaga xabar berilmadi: %s", notify_exc)
 
 
@@ -832,6 +946,8 @@ async def delete_incoming_business_message(
             "message_ids": [message_id],
         })
     except TelegramAPIError as exc:
+        if isinstance(exc, TelegramTemporaryError):
+            raise
         log.warning("Business xabarini o‘chira olmadim: %s", exc)
         try:
             await send_text(
@@ -842,6 +958,8 @@ async def delete_incoming_business_message(
                 "<b>barcha xabarlarni o‘chirish</b> huquqini yoqing.",
             )
         except TelegramAPIError as notify_exc:
+            if isinstance(notify_exc, TelegramTemporaryError):
+                raise
             log.warning("O‘chirish huquqi haqida egaga xabar yuborilmadi: %s", notify_exc)
         return False
 
@@ -858,6 +976,8 @@ async def delete_incoming_business_message(
             "APK yoki havolani bot ochmadi va faylni yuklab olmadi.",
         )
     except TelegramAPIError as exc:
+        if isinstance(exc, TelegramTemporaryError):
+            raise
         log.warning("O‘chirilgan xabar haqida egaga xabar yuborilmadi: %s", exc)
     log.info("Xavfli Business xabari o‘chirildi (%s)", reason)
     return True
@@ -880,7 +1000,11 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         return
 
     if "business_connection" in update:
-        store.save_connection(update["business_connection"])
+        connection_id = update["business_connection"]["id"]
+        info = await api(session, "getBusinessConnection", {"business_connection_id": connection_id})
+        if not isinstance(info, dict) or info.get("id") != connection_id:
+            raise TelegramAPIError("Business ulanishini tasdiqlab bo‘lmadi")
+        store.save_connection(info)
         log.info("Business ulanish holati yangilandi")
         return
 
@@ -948,6 +1072,8 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
                     "disable_web_page_preview": True,
                 })
             except TelegramAPIError as exc:
+                if isinstance(exc, TelegramTemporaryError):
+                    raise
                 log.warning("Himoya sozlamasi xabarini yangilay olmadim: %s", exc)
             return
         await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
@@ -977,6 +1103,8 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
             store.save_connection(info)
             connection = store.connection(str(connection_id))
         except TelegramAPIError as exc:
+            if isinstance(exc, TelegramTemporaryError):
+                raise
             log.warning("Business ulanish ma'lumotini olish imkoni bo‘lmadi: %s", exc)
             return
     if connection is None:
@@ -1035,6 +1163,129 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     log.info("Xavfsizlik ogohlantirishi yuborildi (%s)", result["level"])
 
 
+def validate_update(update: Any) -> None:
+    """Validate the consumed Telegram fields before any API call or state mutation."""
+    def integer(value: Any, positive: bool = False) -> bool:
+        return type(value) is int and abs(value) < 2**63 and (value > 0 if positive else value != 0)
+
+    def obj(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("Invalid object")
+        return value
+
+    def string(value: Any, limit: int) -> None:
+        if not isinstance(value, str) or len(value) > limit:
+            raise ValueError("Invalid string")
+
+    def user(value: Any) -> None:
+        value = obj(value)
+        if not integer(value.get("id"), True):
+            raise ValueError("Invalid user")
+        for name in ("first_name", "last_name", "username"):
+            if name in value:
+                string(value[name], 1024)
+
+    update = obj(update)
+    if type(update.get("update_id")) is not int or not 0 <= update["update_id"] < 2**63:
+        raise ValueError("Invalid update id")
+    # Bound nested structures even for optional fields we do not consume.
+    pending = [(update, 0)]
+    nodes = 0
+    while pending:
+        value, depth = pending.pop()
+        nodes += 1
+        if nodes > 20000 or depth > 24:
+            raise ValueError("Update too complex")
+        if isinstance(value, dict):
+            pending.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list):
+            if len(value) > 1024:
+                raise ValueError("List too large")
+            pending.extend((child, depth + 1) for child in value)
+    kinds = [key for key in ALLOWED_UPDATES if key in update]
+    if len(kinds) > 1:
+        raise ValueError("Multiple update kinds")
+    if not kinds:
+        return  # Acknowledge unused Telegram update kinds without acting on them.
+    kind = kinds[0]
+    value = obj(update[kind])
+    if kind == "business_connection":
+        string(value.get("id"), 256)
+        return  # Routing and ownership are fetched from Telegram, not this payload.
+    if kind == "callback_query":
+        string(value.get("id"), 256)
+        user(value.get("from"))
+        if "data" in value:
+            string(value["data"], 64)
+        if "message" not in value:
+            return
+        value = obj(value["message"])
+    chat = obj(value.get("chat"))
+    if not integer(chat.get("id")) or chat.get("type") not in {"private", "group", "supergroup", "channel"}:
+        raise ValueError("Invalid chat")
+    if not integer(value.get("message_id"), True):
+        raise ValueError("Invalid message")
+    if "from" in value:
+        user(value["from"])
+    if kind in {"business_message", "edited_business_message"}:
+        string(value.get("business_connection_id"), 256)
+        user(value.get("from"))
+    for key in ("text", "caption"):
+        if key in value:
+            string(value[key], 65536)
+    for key in ("entities", "caption_entities"):
+        if key not in value:
+            continue
+        if not isinstance(value[key], list):
+            raise ValueError("Invalid entities")
+        for entity in value[key]:
+            entity = obj(entity)
+            string(entity.get("type"), 64)
+            for field in ("offset", "length"):
+                if type(entity.get(field)) is not int or not 0 <= entity[field] <= 131072:
+                    raise ValueError("Invalid entity span")
+            if "url" in entity:
+                string(entity["url"], 8192)
+    for key in ("document", "contact", "sender_chat", "sender_business_bot"):
+        if key in value:
+            obj(value[key])
+    for key, fields in (("document", ("file_name", "mime_type")), ("contact", ("phone_number",))):
+        for field in fields:
+            if field in value.get(key, {}):
+                string(value[key][field], 1024)
+
+
+async def process_authenticated_update(
+    session: aiohttp.ClientSession, store: Store, update: dict[str, Any],
+) -> None:
+    validate_update(update)
+    update_id = update["update_id"]
+    if store.update_processed(update_id):
+        return
+    message = update.get("message") or update.get("edited_message")
+    if message and message["chat"]["type"] == "private":
+        actor = (message.get("from") or {}).get("id")
+        if actor != message["chat"]["id"]:
+            store.mark_update_processed(update_id)
+            return
+        if not PRIVATE_LIMITER.allow(("private", actor)):
+            store.mark_update_processed(update_id)
+            return
+    query = update.get("callback_query")
+    if query:
+        actor = query["from"]["id"]
+        callback_chat = (query.get("message") or {}).get("chat") or {}
+        if callback_chat.get("type") != "private" or callback_chat.get("id") != actor:
+            await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
+            store.mark_update_processed(update_id)
+            return
+        if not PRIVATE_LIMITER.allow(("callback", actor)):
+            store.mark_update_processed(update_id)
+            return
+    await process_update(session, store, update)
+    store.mark_update_processed(update_id)
+
+
 async def run_polling(session: aiohttp.ClientSession, store: Store) -> None:
     # Local development mode. Render free uses webhooks below.
     await api(session, "deleteWebhook", {"drop_pending_updates": False})
@@ -1047,7 +1298,9 @@ async def run_polling(session: aiohttp.ClientSession, store: Store) -> None:
             updates = await api(session, "getUpdates", payload)
             for update in updates:
                 try:
-                    await process_update(session, store, update)
+                    await process_authenticated_update(session, store, update)
+                except TelegramTemporaryError:
+                    raise
                 except (TelegramAPIError, KeyError, TypeError, ValueError) as exc:
                     log.warning("Yangilanishni qayta ishlashda xato: %s", exc)
                 offset = int(update["update_id"]) + 1
@@ -1059,38 +1312,100 @@ async def run_polling(session: aiohttp.ClientSession, store: Store) -> None:
             await asyncio.sleep(3)
 
 
-async def run_webhook(session: aiohttp.ClientSession, store: Store) -> None:
-    external_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
-    secret = os.environ.get("WEBHOOK_SECRET", "").strip()
-    if not external_url.startswith("https://"):
-        raise SystemExit("Webhook rejimi uchun RENDER_EXTERNAL_URL (HTTPS) kerak.")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", secret):
-        raise SystemExit("WEBHOOK_SECRET 16-256 ta harf, raqam, _ yoki - bo‘lishi kerak.")
+def create_webhook_app(
+    session: aiohttp.ClientSession, store: Store, secret: str,
+) -> web.Application:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", secret):
+        raise ValueError("WEBHOOK_SECRET kamida 32 belgili tasodifiy maxfiy kalit bo‘lishi kerak")
+    secret_bytes = secret.encode("ascii")
+    processing_lock = asyncio.Lock()
+    pending = 0
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError("Invalid JSON constant")
 
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
 
     async def webhook(request: web.Request) -> web.Response:
-        if not secrets.compare_digest(request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), secret):
+        nonlocal pending
+        headers = request.headers.getall("X-Telegram-Bot-Api-Secret-Token", [])
+        supplied = headers[0] if len(headers) == 1 else ""
+        if len(supplied) > 256 or not secrets.compare_digest(supplied.encode("utf-8"), secret_bytes):
             raise web.HTTPForbidden()
+        if request.content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType()
+        if request.headers.get("Content-Encoding", "identity").lower() != "identity":
+            raise web.HTTPUnsupportedMediaType()
+        if request.content_length is not None and request.content_length > MAX_WEBHOOK_BYTES:
+            raise web.HTTPRequestEntityTooLarge(max_size=MAX_WEBHOOK_BYTES, actual_size=request.content_length)
+        if pending >= MAX_PENDING_UPDATES:
+            raise web.HTTPServiceUnavailable(headers={"Retry-After": "5"})
+        pending += 1
+        acquired = False
         try:
-            update = await request.json()
-            await process_update(session, store, update)
+            try:
+                raw = await asyncio.wait_for(request.read(), timeout=10)
+                update = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+                validate_update(update)
+            except (ValueError, TypeError, RecursionError, UnicodeError):
+                raise web.HTTPBadRequest(text="Invalid update") from None
+            await asyncio.wait_for(processing_lock.acquire(), timeout=55)
+            acquired = True
+            await process_authenticated_update(session, store, update)
+        except asyncio.TimeoutError:
+            raise web.HTTPServiceUnavailable(headers={"Retry-After": "5"}) from None
         except (TelegramAPIError, KeyError, TypeError, ValueError, aiohttp.ClientError) as exc:
-            log.exception("Webhook yangilanishini qayta ishlashda xato: %s", exc)
-            raise web.HTTPInternalServerError(text="Update processing failed") from exc
+            log.warning("Webhook processing failed (%s)", type(exc).__name__)
+            raise web.HTTPServiceUnavailable(text="Processing unavailable", headers={"Retry-After": "5"}) from None
+        finally:
+            if acquired:
+                processing_lock.release()
+            pending -= 1
         return web.json_response({"ok": True})
 
-    app = web.Application(client_max_size=1024 * 1024)
+    async def secure_response(request: web.Request, response: web.StreamResponse) -> None:
+        response.headers.pop("Server", None)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+
+    app = web.Application(client_max_size=MAX_WEBHOOK_BYTES)
+    app.on_response_prepare.append(secure_response)
+    app.router.add_get("/", health)
     app.router.add_get("/healthz", health)
     app.router.add_post(WEBHOOK_PATH, webhook)
-    runner = web.AppRunner(app)
+    return app
+
+
+async def run_webhook(session: aiohttp.ClientSession, store: Store) -> None:
+    external_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+    secret = os.environ.get("WEBHOOK_SECRET", "").strip()
+    parsed = urlsplit(external_url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
+        raise SystemExit("Webhook uchun RENDER_EXTERNAL_URL to‘g‘ri HTTPS manzil bo‘lishi kerak")
+    app = create_webhook_app(session, store, secret)
+    runner = web.AppRunner(
+        app, access_log=None, auto_decompress=False, keepalive_timeout=15,
+        max_line_size=8190, max_field_size=8190, max_headers=64,
+    )
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "10000")))
     await site.start()
     await api(session, "setWebhook", {
         "url": f"{external_url}{WEBHOOK_PATH}",
         "secret_token": secret,
+        "max_connections": 4,
         "allowed_updates": ALLOWED_UPDATES,
         "drop_pending_updates": False,
     })
@@ -1102,8 +1417,8 @@ async def run_webhook(session: aiohttp.ClientSession, store: Store) -> None:
 
 
 async def run() -> None:
-    if not BOT_TOKEN:
-        raise SystemExit("BOT_TOKEN topilmadi. .env.example faylidan .env yarating va tokenni kiriting.")
+    if not re.fullmatch(r"[0-9]{6,}:[A-Za-z0-9_-]{20,}", BOT_TOKEN):
+        raise SystemExit("BOT_TOKEN topilmadi yoki formati noto‘g‘ri. Render maxfiy sozlamasini tekshiring.")
     store = Store(DB_PATH)
     timeout = aiohttp.ClientTimeout(total=40, connect=15)
     connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
@@ -1113,6 +1428,8 @@ async def run() -> None:
         try:
             await api(session, "deleteMyCommands")
         except TelegramAPIError as exc:
+            if isinstance(exc, TelegramTemporaryError):
+                raise
             log.warning("Bot menyusidagi eski buyruqlarni tozalash imkoni bo‘lmadi: %s", exc)
         if os.environ.get("RENDER_EXTERNAL_URL"):
             await run_webhook(session, store)

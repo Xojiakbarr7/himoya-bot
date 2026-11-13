@@ -6,6 +6,7 @@ services:
     region: frankfurt
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
+    healthCheckPath: /healthz
     envVars:
       - key: BOT_TOKEN
         sync: false
