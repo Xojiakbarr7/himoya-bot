@@ -757,7 +757,8 @@ async def send_deleted_list(session: aiohttp.ClientSession, owner: int, page: in
         if item.get("media"):
             preview = "📎 " + item["media"]["kind"] + " · " + preview
         lines.append(f"<b>{index}. {html.escape(item['sender'])}</b> — {html.escape(preview)}")
-    buttons = [[{"text": "📨 Shu 10 ta xabarni yuborish", "callback_data": f"history:batch:{page}"}]]
+    buttons = [[{"text": "📨 Shu 10 ta xabarni yuborish", "callback_data": f"history:batch:{page}"}],
+               [{"text": "📨 Barcha o‘chirilganlarni yuborish", "callback_data": "history:all"}]]
     navigation = []
     if page:
         navigation.append({"text": "⬅️ Oldingi 10 ta", "callback_data": f"history:list:{page - 1}"})
@@ -797,6 +798,40 @@ async def send_deleted_item(session: aiohttp.ClientSession, owner: int, item: di
         await send_text(session, owner, "⚠️ Xabardagi mediani qayta yuborib bo‘lmadi; Telegram faylga ruxsat bermadi.")
 
 
+async def send_all_deleted(session: aiohttp.ClientSession, owner: int) -> None:
+    records = DELETED_HISTORY.deleted(owner)
+    if not records:
+        await send_text(session, owner, "Hozircha ko‘rsatadigan o‘chirilgan xabar yo‘q.")
+        return
+    await send_text(session, owner, f"📨 {len(records)} ta o‘chirilgan xabar yuborilyapti…")
+    text_parts: list[str] = []
+    size = 0
+
+    async def flush_text() -> None:
+        nonlocal text_parts, size
+        if text_parts:
+            await api(session, "sendMessage", {
+                "chat_id": owner, "text": "\n\n────────────\n\n".join(text_parts),
+                "parse_mode": "HTML", "protect_content": True,
+                "disable_web_page_preview": True,
+            })
+            text_parts, size = [], 0
+
+    for index, item in enumerate(records, 1):
+        media = item.get("media")
+        if media:
+            await flush_text()
+            await send_deleted_item(session, owner, item)
+            continue
+        body = item.get("text") or "[Matn yo‘q]"
+        part = f"<b>{index}. {html.escape(item['sender'])}</b>\n<pre>{html.escape(body)}</pre>"
+        if size + len(part) > 3500:
+            await flush_text()
+        text_parts.append(part)
+        size += len(part)
+    await flush_text()
+
+
 async def handle_history_callback(session: aiohttp.ClientSession, store: Store, query: dict[str, Any]) -> None:
     owner = int(query["from"]["id"])
     data = str(query.get("data") or "")
@@ -820,6 +855,8 @@ async def handle_history_callback(session: aiohttp.ClientSession, store: Store, 
         except ValueError:
             page = 0
         await send_deleted_list(session, owner, page)
+    elif data == "history:all":
+        await send_all_deleted(session, owner)
     elif data.startswith("history:batch:"):
         try:
             page = int(data.rsplit(":", 1)[1])
@@ -859,7 +896,7 @@ async def handle_business_deletions(session: aiohttp.ClientSession, store: Store
     text += "\n\nKim o‘chirganini Telegram bildirmaydi."
     await api(session, "sendMessage", {
         "chat_id": owner_chat, "text": text,
-        "reply_markup": {"inline_keyboard": [[{"text": "📖 Xabarlarni ko‘rish", "callback_data": "history:list:0"}]]},
+        "reply_markup": {"inline_keyboard": [[{"text": "📨 O‘chirilgan xabarlarning barchasini ko‘rish", "callback_data": "history:all"}]]},
     })
 
 
