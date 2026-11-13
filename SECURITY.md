@@ -9,7 +9,7 @@
 - Sozlama tugmalari faqat foydalanuvchining o‘z bot chatida ishlaydi. Business ulanish egasi Telegram API orqali tasdiqlanadi.
 - Telegram API so‘rovlari boshqa manzilga yo‘naltirilmaydi. Javob hajmi cheklangan; tarmoq xatosidagi tokenli URL logga chiqarilmaydi. Log formati token va webhook kalitini yashiradi. Production HTTP access loglari o‘chirilgan.
 - SQLite fayli faqat server foydalanuvchisiga ochiq (0600); SQL qiymatlari parametr bilan beriladi. Baza xabar matni va fayllarni saqlamaydi.
-- O‘chirilgan xabarlar rejimi faqat foydalanuvchi alohida yoqqanda yangi kiruvchi Business xabarlarining cheklangan matn nusxalarini RAM’da ushlaydi (1 soatgacha, 100 ta/ega, 2000 ta/jarayon). Media yuklab olinmaydi. Ko‘rish callbacklari egaga bog‘langan; rejimni o‘chirishda yoki ulanish o‘chirilganda egasining nusxalari tozalanadi. Fon tozalash har daqiqada ishlaydi. Bot chatiga allaqachon yuborilgan matnlar Telegram’da qoladi.
+- O‘chirilgan xabarlar rejimi faqat rozilik bilan yoqiladi: matn va oddiy Telegram media file_id saqlanadi (72 soat; o‘chirish aniqlansa yana 72 soat; 1000/ega, 20000/jami). HISTORY_DATABASE_URL bilan PostgreSQL/TLS, aks holda RAM. Media yuklab olinmaydi; himoyalangan, pulli va bir martalik media arxivlanmaydi. Faqat egasi ko‘radi. Rejim o‘chirilganda yoki ulanish bekor qilinganda nusxalar tozalanadi. Muddati tugagan yozuvlarni ko‘rish taqiqlanadi; fon tozalash server ishlaganda har daqiqada. Bot chatiga yuborilgan nusxalar u yerda qoladi.
 - aiohttp versiyasi belgilangan; Dependabot haftalik yangilanish PRlarini ochadi. Yangilanishlar tekshirilib, qo‘lda birlashtiriladi.
 
 ## Server egasi bajaradigan ishlar

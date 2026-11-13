@@ -1,7 +1,8 @@
 """Telegram Business security assistant.
 
 This starter monitors only business chats explicitly granted to the bot. It
-does not download files or send message contents to third-party services.
+does not download files. Opt-in history may store text and media identifiers in
+a configured PostgreSQL database.
 """
 
 from __future__ import annotations
@@ -127,10 +128,33 @@ class InteractionLimiter:
 PRIVATE_LIMITER = InteractionLimiter()
 
 
-class TemporaryMessageHistory:
-    """Opt-in RAM-only snapshots; no message text, file IDs or contents are written to disk."""
+MEDIA_METHODS = {
+    "photo": "sendPhoto", "video": "sendVideo", "voice": "sendVoice",
+    "audio": "sendAudio", "document": "sendDocument", "animation": "sendAnimation",
+    "video_note": "sendVideoNote", "sticker": "sendSticker",
+}
 
-    def __init__(self, ttl: float = 3600, per_owner: int = 100, total: int = 2000) -> None:
+
+def history_media(message: dict[str, Any]) -> dict[str, str] | None:
+    # Do not retain protected, paid or disappearing media. No file download/bypass.
+    if any(message.get(k) for k in ("has_protected_content", "paid_media", "ttl_seconds", "self_destruct_time")):
+        return None
+    for kind in ("animation", "photo", "video", "voice", "audio", "document", "video_note", "sticker"):
+        value = message.get(kind)
+        if kind == "photo" and isinstance(value, list):
+            value = value[-1] if value else None
+        if not isinstance(value, dict) or value.get("ttl_seconds"):
+            continue
+        file_id = value.get("file_id")
+        if isinstance(file_id, str) and 0 < len(file_id) <= 512:
+            return {"kind": kind, "file_id": file_id}
+    return None
+
+
+class TemporaryMessageHistory:
+    """Opt-in bounded snapshots. PostgreSQL backend is configured separately."""
+
+    def __init__(self, ttl: float = 259200, per_owner: int = 1000, total: int = 20000) -> None:
         self.ttl, self.per_owner, self.total = ttl, per_owner, total
         self.items: OrderedDict[tuple[str, int, int], dict[str, Any]] = OrderedDict()
 
@@ -150,10 +174,11 @@ class TemporaryMessageHistory:
         sender = message.get("from") or {}
         name = " ".join(str(sender.get(field) or "") for field in ("first_name", "last_name")).strip()
         name = ("@" + sender["username"]) if sender.get("username") else name or str(sender.get("id") or "Noma’lum")
-        text = message.get("text") or message.get("caption") or "[Matnsiz xabar; media fayli saqlanmagan]"
+        media = history_media(message) if not ignored else None
+        text = message.get("text") or message.get("caption") or ("[" + media["kind"] + "]" if media else "[Bu turdagi xabar saqlanmaydi]")
         self.items[key] = {
             "owner": owner, "sender": name[:128], "text": "" if ignored else str(text)[:4096],
-            "expires": time.monotonic() + self.ttl, "deleted": False, "ignored": ignored,
+            "expires": time.monotonic() + self.ttl, "deleted": previous["deleted"] if previous else False, "ignored": ignored, "media": media,
             "token": previous["token"] if previous else secrets.token_urlsafe(12),
         }
         owner_keys = [key for key, item in self.items.items() if item["owner"] == owner]
@@ -171,6 +196,7 @@ class TemporaryMessageHistory:
                 missing += 1
             elif not item["ignored"] and not item["deleted"]:
                 item["deleted"] = True
+                item["expires"] = time.monotonic() + self.ttl
                 found += 1
         return found, missing
 
@@ -179,6 +205,87 @@ class TemporaryMessageHistory:
         return [item for item in reversed(self.items.values()) if item["owner"] == owner and item["deleted"]]
 
     def detail(self, owner: int, token: str) -> dict[str, Any] | None:
+        return next((item for item in self.deleted(owner) if item["token"] == token), None)
+
+
+class PostgresMessageHistory:
+    """Durable, owner-scoped 72-hour history; all SQL values are bound parameters."""
+
+    def __init__(self, url: str) -> None:
+        import psycopg
+        self.driver, self.url = psycopg, url
+        self._execute([
+            ("CREATE TABLE IF NOT EXISTS qalqon_history (connection TEXT NOT NULL, chat BIGINT NOT NULL, message BIGINT NOT NULL, owner BIGINT NOT NULL, expires DOUBLE PRECISION NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(connection,chat,message))", ()),
+            ("CREATE INDEX IF NOT EXISTS qalqon_history_owner_age ON qalqon_history(owner,expires)", ()),
+            ("CREATE TABLE IF NOT EXISTS qalqon_history_settings (owner BIGINT PRIMARY KEY, enabled INTEGER NOT NULL)", ()),
+        ])
+        self.prune()
+
+    def _execute(self, statements):
+        try:
+            with self.driver.connect(self.url, connect_timeout=5, sslmode="require", options="-c statement_timeout=5000") as connection:
+                result = []
+                for sql, values in statements:
+                    cursor = connection.execute(sql, values)
+                    result = cursor.fetchall() if cursor.description else []
+                return result
+        except self.driver.Error:
+            # Never leak credentials, SQL parameters or message bodies to logs.
+            raise TelegramTemporaryError("Tarix bazasi vaqtincha mavjud emas") from None
+
+    def prune(self):
+        self._execute([("DELETE FROM qalqon_history WHERE expires<=%s", (time.time(),))])
+
+    def clear(self, owner):
+        self._execute([("DELETE FROM qalqon_history WHERE owner=%s", (owner,))])
+
+    def enabled(self, owner):
+        rows = self._execute([("SELECT enabled FROM qalqon_history_settings WHERE owner=%s", (owner,))])
+        return bool(rows and rows[0][0])
+
+    def set_enabled(self, owner, enabled):
+        self._execute([("INSERT INTO qalqon_history_settings(owner,enabled) VALUES(%s,%s) ON CONFLICT(owner) DO UPDATE SET enabled=excluded.enabled", (owner, int(enabled)))])
+
+    def remember(self, owner, connection, message, ignored=False):
+        key = (connection, int(message["chat"]["id"]), int(message["message_id"]))
+        old = self._execute([("SELECT payload FROM qalqon_history WHERE connection=%s AND chat=%s AND message=%s AND owner=%s AND expires>%s", (*key, owner, time.time()))])
+        temporary = TemporaryMessageHistory()
+        temporary.remember(owner, connection, message, ignored)
+        item = temporary.items[key]
+        if old:
+            previous = json.loads(old[0][0])
+            item.update(token=previous["token"], deleted=previous["deleted"])
+        item["expires"] = time.time() + 259200
+        self._execute([
+            ("INSERT INTO qalqon_history(connection,chat,message,owner,expires,payload) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(connection,chat,message) DO UPDATE SET owner=excluded.owner,expires=excluded.expires,payload=excluded.payload", (*key, owner, item["expires"], json.dumps(item))),
+            ("DELETE FROM qalqon_history WHERE expires<=%s", (time.time(),)),
+            ("DELETE FROM qalqon_history WHERE owner=%s AND (connection,chat,message) IN (SELECT connection,chat,message FROM qalqon_history WHERE owner=%s ORDER BY expires DESC OFFSET 1000)", (owner, owner)),
+            ("DELETE FROM qalqon_history WHERE (connection,chat,message) IN (SELECT connection,chat,message FROM qalqon_history ORDER BY expires DESC OFFSET 20000)", ()),
+        ])
+
+    def mark_deleted(self, owner, connection, chat_id, message_ids):
+        rows = self._execute([("SELECT message,payload FROM qalqon_history WHERE owner=%s AND connection=%s AND chat=%s AND expires>%s", (owner, connection, chat_id, time.time()))])
+        records = {row[0]: json.loads(row[1]) for row in rows}
+        found = missing = 0
+        writes = []
+        for message_id in set(message_ids):
+            item = records.get(message_id)
+            if item is None:
+                missing += 1
+            elif not item["ignored"] and not item["deleted"]:
+                item["deleted"] = True
+                item["expires"] = time.time() + 259200
+                found += 1
+                writes.append(("UPDATE qalqon_history SET payload=%s,expires=%s WHERE owner=%s AND connection=%s AND chat=%s AND message=%s", (json.dumps(item), item["expires"], owner, connection, chat_id, message_id)))
+        if writes:
+            self._execute(writes)
+        return found, missing
+
+    def deleted(self, owner):
+        rows = self._execute([("SELECT payload FROM qalqon_history WHERE owner=%s AND expires>%s ORDER BY expires DESC", (owner, time.time()))])
+        return [item for row in rows if (item := json.loads(row[0]))["deleted"]]
+
+    def detail(self, owner, token):
         return next((item for item in self.deleted(owner) if item["token"] == token), None)
 
 
@@ -332,10 +439,14 @@ class Store:
         self.db.commit()
 
     def history_enabled(self, owner: int) -> bool:
+        if isinstance(DELETED_HISTORY, PostgresMessageHistory):
+            return DELETED_HISTORY.enabled(owner)
         row = self.db.execute("SELECT deleted_history FROM user_settings WHERE owner_user_id=?", (owner,)).fetchone()
         return bool(row[0]) if row else False
 
     def set_history(self, owner: int, enabled: bool) -> None:
+        if isinstance(DELETED_HISTORY, PostgresMessageHistory):
+            DELETED_HISTORY.set_enabled(owner, enabled)
         self.db.execute(
             "INSERT INTO user_settings(owner_user_id,deleted_history) VALUES(?,?) "
             "ON CONFLICT(owner_user_id) DO UPDATE SET deleted_history=excluded.deleted_history",
@@ -569,7 +680,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
             "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>barcha xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
             "3. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
-            "⚠️ Bot APK faylni antivirus kabi tekshirmaydi; xavf belgilariga qarab ogohlantiradi. Xabar matnlari bazada saqlanmaydi, fayllar yuklab olinmaydi."
+            "⚠️ Bot APK faylni antivirus kabi tekshirmaydi; xavf belgilariga qarab ogohlantiradi. Tarix rejimi yoqilsa matn va media identifikatori 3 kungacha saqlanadi. Fayllar yuklab olinmaydi."
         ),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
@@ -591,9 +702,12 @@ async def send_history_menu(session: aiohttp.ClientSession, store: Store, owner:
     status = "🟢 YOQILGAN" if store.history_enabled(owner) else "⚪ O‘CHIRILGAN"
     await send_text(session, owner,
         f"📝 <b>O‘chirilgan xabarlar: {status}</b>\n\n"
-        "Yoqsangiz, bot ruxsat berilgan Business shaxsiy chatlaridan kelgan oxirgi 100 ta xabar "
-        "matnini serverning vaqtinchalik xotirasida 1 soatgacha eslab turadi. Matn bazaga yozilmaydi; "
-        "rasm va fayllar saqlanmaydi. Server qayta ishga tushsa bu xotira yo‘qoladi.\n\n"
+        "Yoqsangiz, bot yangi kiruvchi xabarlarning matni va oddiy media identifikatorini "
+        "72 soatgacha (3 kun), oxirgi 1000 ta xabar doirasida saqlaydi. O‘chirilishi aniqlansa yana 3 kun saqlaydi. "
+        "Rasm, video, ovoz, audio, hujjat, GIF va stiker qo‘llanadi. Fayl yuklab olinmaydi. "
+        "Bir martalik va himoyalangan media saqlanmaydi.\n\n"
+        + ("✅ Tashqi baza ulangan: tarix server restartidan keyin ham qoladi.\n\n" if isinstance(DELETED_HISTORY, PostgresMessageHistory) else
+           "⚠️ Doimiy baza hali ulanmagan: restartda tarix yo‘qoladi, 3 kun kafolatlanmaydi.\n\n") +
         "Telegram o‘chirish hodisasini yuborsa, oldindan eslab qolingan matnni shu bot chatida ko‘rishingiz mumkin. "
         "Bot rejim yoqilishidan oldingi yoki botga kelmagan xabarlarni tiklamaydi. "
         "Butun chat o‘chirilganda hodisa kelishi kafolatlanmaydi; kim o‘chirganini API bildirmaydi.\n\n"
@@ -643,7 +757,7 @@ async def handle_history_callback(session: aiohttp.ClientSession, store: Store, 
             await send_text(session, owner, "Avval botni Telegram Business orqali shu akkauntingizga ulang.")
             return
         store.set_history(owner, True)
-        await send_text(session, owner, "✅ Rejim yoqildi. Endi keladigan xabarlar matni vaqtincha eslab turiladi: 1 soatgacha, oxirgi 100 ta xabar.")
+        await send_text(session, owner, "✅ Rejim yoqildi: matn va oddiy media 72 soatgacha, oxirgi 1000 ta xabar doirasida. Saqlash holati rejim menyusida ko‘rsatilgan.")
     elif data in {"history:off", "history:clear"}:
         if data == "history:off":
             store.set_history(owner, False)
@@ -662,6 +776,16 @@ async def handle_history_callback(session: aiohttp.ClientSession, store: Store, 
         if item is None:
             await send_text(session, owner, "Bu xabar xotirada yo‘q yoki saqlash muddati tugagan.")
             return
+        media = item.get("media")
+        if media:
+            try:
+                await api(session, MEDIA_METHODS[media["kind"]], {
+                    "chat_id": owner, media["kind"]: media["file_id"], "protect_content": True,
+                })
+            except TelegramAPIError as exc:
+                if isinstance(exc, TelegramTemporaryError):
+                    raise
+                await send_text(session, owner, "Telegram bu mediani qayta yuborishga ruxsat bermadi yoki fayl endi mavjud emas.")
         for offset in range(0, len(item["text"]), 3000):
             await send_text(session, owner,
                 f"📝 <b>Yuboruvchi: {html.escape(item['sender'])}</b>\n"
@@ -689,7 +813,7 @@ async def handle_business_deletions(session: aiohttp.ClientSession, store: Store
     text += "\n\nKim o‘chirganini Telegram bildirmaydi."
     await api(session, "sendMessage", {
         "chat_id": owner_chat, "text": text,
-        "reply_markup": {"inline_keyboard": [[{"text": "📖 Matnlarni ko‘rish", "callback_data": "history:list:0"}]]},
+        "reply_markup": {"inline_keyboard": [[{"text": "📖 Xabarlarni ko‘rish", "callback_data": "history:list:0"}]]},
     })
 
 
@@ -1499,7 +1623,10 @@ async def run_webhook(session: aiohttp.ClientSession, store: Store) -> None:
     async def expire_history() -> None:
         while True:
             await asyncio.sleep(60)
-            DELETED_HISTORY.prune()
+            try:
+                DELETED_HISTORY.prune()
+            except TelegramTemporaryError:
+                log.warning("Tarix bazasini tozalash vaqtincha kechiktirildi")
     expiry_task = asyncio.create_task(expire_history())
     try:
         await asyncio.Event().wait()
@@ -1510,6 +1637,10 @@ async def run_webhook(session: aiohttp.ClientSession, store: Store) -> None:
 
 
 async def run() -> None:
+    global DELETED_HISTORY
+    history_url = os.environ.get("HISTORY_DATABASE_URL", "").strip()
+    if history_url:
+        DELETED_HISTORY = PostgresMessageHistory(history_url)
     if not re.fullmatch(r"[0-9]{6,}:[A-Za-z0-9_-]{20,}", BOT_TOKEN):
         raise SystemExit("BOT_TOKEN topilmadi yoki formati noto‘g‘ri. Render maxfiy sozlamasini tekshiring.")
     store = Store(DB_PATH)

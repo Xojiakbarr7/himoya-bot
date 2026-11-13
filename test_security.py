@@ -244,6 +244,44 @@ class WebhookSecurityTests(unittest.IsolatedAsyncioTestCase):
             "message": {"message_id": 1, "chat": {"id": actor, "type": "private"}},
         }}
 
+    async def test_media_history_all_types_and_owner_isolation(self):
+        self.connect_history()
+        for index, kind in enumerate(main.MEDIA_METHODS, 1):
+            update = business_update(index, "")
+            media = {"file_id": "test-file-" + kind}
+            update["business_message"][kind] = [media] if kind == "photo" else media
+            await self.post(update)
+        await self.post(self.deletion(20, list(range(1, 9))))
+        for index, item in enumerate(main.DELETED_HISTORY.deleted(10)):
+            token = item["token"]
+            self.api.reset_mock()
+            await self.post(self.history_callback(30 + index, "history:view:" + token, actor=30))
+            self.assertFalse(any(call.args[1] in main.MEDIA_METHODS.values() for call in self.api.await_args_list))
+            await self.post(self.history_callback(50 + index, "history:view:" + token))
+            calls = [call for call in self.api.await_args_list if call.args[1] in main.MEDIA_METHODS.values()]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0].args[2]["chat_id"], 10)
+            self.assertTrue(calls[0].args[2]["protect_content"])
+
+    async def test_protected_and_ephemeral_media_not_retained(self):
+        self.connect_history()
+        for index, field in enumerate(("has_protected_content", "ttl_seconds", "paid_media"), 1):
+            update = business_update(index, "caption")
+            update["business_message"].update(photo=[{"file_id": "protected-secret"}], **{field: True})
+            await self.post(update)
+        self.assertNotIn("protected-secret", str(main.DELETED_HISTORY.items))
+
+    async def test_history_three_day_boundary_after_deletion(self):
+        self.connect_history()
+        with patch.object(main.time, "monotonic", return_value=1000000):
+            main.DELETED_HISTORY.remember(10, "c", business_update(1, "hello")["business_message"])
+        with patch.object(main.time, "monotonic", return_value=1000000 + 172800):
+            self.assertEqual(main.DELETED_HISTORY.mark_deleted(10, "c", 20, [1]), (1, 0))
+        with patch.object(main.time, "monotonic", return_value=1000000 + 172800 + 259199):
+            self.assertEqual(len(main.DELETED_HISTORY.deleted(10)), 1)
+        with patch.object(main.time, "monotonic", return_value=1000000 + 172800 + 259200):
+            self.assertEqual(main.DELETED_HISTORY.deleted(10), [])
+
     async def test_deleted_history_is_off_by_default(self):
         self.connect_history(False)
         await self.post(business_update(1, "private text"))

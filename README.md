@@ -15,20 +15,32 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Rejim yoqilganida APK/ishga tushiriladigan fayllar hamda barcha havolali kiruvchi xabarlar o‘chiriladi. Oddiy, qisqartirilgan va matn ichiga yashirilgan havolalar, shuningdek media izohidagi havolalar ham aniqlanadi. Faqat matnli ogohlantirish iboralari avtomatik o‘chirilmaydi. O‘chirilgan xabar haqida egasiga bot orqali xabar boradi.
 - Pastki menyudagi **⚠️ Yuborilgan xabar ogohlantirishi** orqali egasi akkauntidan APK yoki aniq shubhali havola yuborilganda oluvchiga ogohlantirish yozishni yoqish/o‘chirish mumkin; standart holati o‘chiq.
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
-- **📝 O‘chirilgan xabarlar** — foydalanuvchi alohida rozilik bilan yoqsa, Business shaxsiy chatlaridagi oxirgi 100 tagacha kiruvchi xabarning matnini RAM’da 1 soatgacha eslab turadi. `deleted_business_messages` hodisasi kelsa, oldindan ko‘rilgan matnni faqat akkaunt egasiga ko‘rsatadi. Rejim standart holatda o‘chiq.
+- **📝 O‘chirilgan xabarlar** — foydalanuvchi alohida rozilik bilan yoqsa, Business shaxsiy chatlaridagi oxirgi 1000 tagacha kiruvchi xabarning matni va oddiy media identifikatorini 72 soatgacha eslab turadi. `deleted_business_messages` hodisasi kelsa, oldindan ko‘rilgan matnni faqat akkaunt egasiga ko‘rsatadi. Rejim standart holatda o‘chiq.
 - Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; qo‘lda tekshirilgan xabarlar tarixga yozilmaydi.
 - Guruhda APK, ishga tushiriladigan fayl, istalgan havola yoki belgilangan firibgarlik iborasi topilsa, xabarni o‘chiradi va guruhga kim hamda nima yuborganini yozadi.
-- Xabar matnini yoki fayllarni bazada saqlamaydi; tashqi skanerga yubormaydi.
+- Tarix yoqilganda matn va media identifikatori saqlanadi; fayllar yuklab olinmaydi va tashqi skanerga yuborilmaydi.
 
 ## O‘chirilgan xabarlarni vaqtincha ko‘rish
 
 Pastdagi **📝 O‘chirilgan xabarlar → Roziman, yoqish** orqali ishga tushiriladi. Faqat botga ruxsat berilgan shaxsiy Business chatlaridan keladigan yangi kiruvchi xabarlar eslab turiladi. Sozlama yoqilmasdan oldingi yoki botga umuman kelmagan xabarlar tiklanmaydi. Telegram o‘chirish hodisasida xabar matnini hamda kim o‘chirganini yubormaydi; butun chatni o‘chirish har doim shu hodisani keltirib chiqarmasligi mumkin.
 
-Matnlar disk/bazaga yozilmaydi: RAM’da har egaga 100 tagacha, butun jarayonda 2000 tagacha nusxa, qabul qilingandan keyin 1 soatgacha saqlanadi. Joy to‘lsa eng eski yozuvlar o‘chadi; muddati o‘tgan nusxalar ko‘rsatilmaydi va fon vazifasi har daqiqada tozalaydi. Rasm, APK, video va boshqa fayllar yuklab olinmaydi; matnsiz xabar uchun faqat shunday xabar bo‘lgani ko‘rsatiladi. Yangi xabarlar kelmasa ham vaqt bo‘yicha tozalash davom etadi. Server qayta ishga tushganda RAM yo‘qoladi.
+Tarix muddati — qabul qilingandan boshlab 72 soat. O‘chirish hodisasi aniqlansa yana 72 soat beriladi. Har egaga 1000, butun botga 20000 yozuv chegarasi bor: to‘lsa eng eski yozuvlar oldinroq o‘chadi. Matn/caption, rasm, video, ovozli xabar, audio, hujjat, GIF, video doira va stiker qo‘llanadi. Media uchun faqat Telegram `file_id` saqlanadi; faylning o‘zi yuklab olinmaydi. Qayta ko‘rish Telegram faylni qayta yuborishga ruxsat berishiga bog‘liq. Bir martalik, himoyalangan yoki pulli media arxivlanmaydi. Kontakt, lokatsiya va so‘rovnomalar bu versiyaga kirmaydi.
 
-O‘chirish hodisasidan so‘ng bot bildirishnoma yuboradi; **Matnlarni ko‘rish** yoki rejim menyusidagi **O‘chirilganlarni ko‘rish** orqali varaqlanadi. Spamni kamaytirish uchun bir egaga daqiqasiga 6 tagacha o‘chirish bildirishnomasi yuboriladi; ortiqcha hodisalarda ham matnlar cheklovlar doirasida ro‘yxatda ko‘rinadi. Botning o‘zi avto o‘chirgan xabarlari ikkinchi marta bu bildirishnomaga kiritilmaydi.
+`HISTORY_DATABASE_URL` berilsa, tarix va uning yoqish/o‘chirish sozlamasi TLS orqali tashqi PostgreSQL’da saqlanadi va Render restartidan keyin qoladi. URL berilmasa RAM rejimi ishlaydi: restartda tarix yo‘qoladi. Menyu bu holatni ochiq ko‘rsatadi. Muddati tugagan yozuvlar ko‘rsatilmaydi, ishlayotgan server har daqiqada tozalaydi; server/baza o‘chiq bo‘lsa fizik tozalash qayta ishlaganda davom etadi. Baza nosoz bo‘lsa Telegram update qayta urinishi uchun vaqtinchalik xato qaytariladi.
 
-**O‘chirish** yoki **Vaqtinchalik xotirani tozalash** egasining RAM nusxalarini o‘chiradi. Bot allaqachon egasining Telegram chatiga yuborgan matnlar o‘sha chatda qoladi. Har bir egaga faqat o‘z yozuvlari ochiladi; callback token boshqa egaga matnni ko‘rsatmaydi.
+### Bepul tashqi bazani ulash (Neon)
+
+1. https://console.neon.tech da Free loyiha oching. Boshqa loyiha bazasini ishlatmang.
+2. `Connect` bo‘limidan PostgreSQL connection URL nusxalang (TLS yoqilgan bo‘lsin).
+3. Render → himoya-bot → Environment: `HISTORY_DATABASE_URL` qiymatiga URL qo‘ying va saqlab deploy qiling. Parol/URL’ni chatga yoki GitHubga yozmang.
+4. Botdagi **O‘chirilgan xabarlar** menyusida **Tashqi baza ulangan** holatini tekshiring, rejimni qayta yoqing.
+5. Ikkinchi akkauntdan oddiy matn/rasm yuboring, o‘chiring, botda ko‘ring. Restartdan so‘ng ham ro‘yxatni tekshiring.
+
+Baza ulanganda jadvallar avtomatik yaratiladi (`qalqon_history`, `qalqon_history_settings`). Oldingi RAM nusxalari avtomatik ko‘chirilmaydi. Provider kvotalari va tariflari alohida amal qiladi. Bu versiya uchun tashqi baza hali provision qilinmagan: jonli PostgreSQL integratsiya testi URL qo‘shilgandan keyin bajariladi.
+
+O‘chirish hodisasidan so‘ng bot bildirishnoma yuboradi; **Xabarlarni ko‘rish** yoki rejim menyusidagi **O‘chirilganlarni ko‘rish** orqali varaqlanadi. Spamni kamaytirish uchun bir egaga daqiqasiga 6 tagacha o‘chirish bildirishnomasi yuboriladi; ortiqcha hodisalarda ham matnlar cheklovlar doirasida ro‘yxatda ko‘rinadi. Botning o‘zi avto o‘chirgan xabarlari ikkinchi marta bu bildirishnomaga kiritilmaydi.
+
+**O‘chirish** yoki **Vaqtinchalik xotirani tozalash** egasining saqlangan nusxalarini o‘chiradi. Bot allaqachon egasining Telegram chatiga yuborgan matnlar o‘sha chatda qoladi. Har bir egaga faqat o‘z yozuvlari ochiladi; callback token boshqa egaga matnni ko‘rsatmaydi.
 
 ## Muhim chegaralar
 
