@@ -41,6 +41,10 @@ class WebhookSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.api_patch.start()
         self.limiter_patch = patch.object(main, "PRIVATE_LIMITER", main.InteractionLimiter())
         self.limiter_patch.start()
+        self.history_patch = patch.object(main, "DELETED_HISTORY", main.TemporaryMessageHistory())
+        self.history_patch.start()
+        self.notice_patch = patch.object(main, "DELETION_NOTICE_LIMITER", main.InteractionLimiter(capacity=6))
+        self.notice_patch.start()
         server = TestServer(main.create_webhook_app(None, self.store, SECRET))
         await server.start_server(auto_decompress=False, access_log=None)
         self.client = TestClient(server)
@@ -51,6 +55,8 @@ class WebhookSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.store.db.close()
         self.api_patch.stop()
         self.limiter_patch.stop()
+        self.history_patch.stop()
+        self.notice_patch.stop()
         self.temp.cleanup()
 
     async def post(self, value=None, **kwargs):
@@ -222,6 +228,112 @@ class WebhookSecurityTests(unittest.IsolatedAsyncioTestCase):
         update["message"]["text"] = "https://example.com"
         self.assertEqual((await self.post(update)).status, 200)
         self.assertIn("deleteMessage", [call.args[1] for call in self.api.await_args_list])
+
+    def connect_history(self, enabled=True):
+        self.store.save_connection({"id": "c", "user": {"id": 10}, "user_chat_id": 10, "is_enabled": True})
+        self.store.set_history(10, enabled)
+
+    def deletion(self, update_id, ids):
+        return {"update_id": update_id, "deleted_business_messages": {
+            "business_connection_id": "c", "chat": {"id": 20, "type": "private"}, "message_ids": ids,
+        }}
+
+    def history_callback(self, update_id, data, actor=10):
+        return {"update_id": update_id, "callback_query": {
+            "id": str(update_id), "from": {"id": actor}, "data": data,
+            "message": {"message_id": 1, "chat": {"id": actor, "type": "private"}},
+        }}
+
+    async def test_deleted_history_is_off_by_default(self):
+        self.connect_history(False)
+        await self.post(business_update(1, "private text"))
+        await self.post(self.deletion(2, [1]))
+        self.assertFalse(main.DELETED_HISTORY.items)
+        self.api.assert_not_awaited()
+
+    async def test_received_then_deleted_text_available_only_to_owner_and_not_on_disk(self):
+        self.connect_history()
+        secret = "Private <script>hello</script>"
+        await self.post(business_update(1, secret))
+        self.assertEqual((await self.post(self.deletion(2, [1]))).status, 200)
+        records = main.DELETED_HISTORY.deleted(10)
+        self.assertEqual(records[0]["text"], secret)
+        token = records[0]["token"]
+        self.api.reset_mock()
+        self.store.set_history(30, True)
+        await self.post(self.history_callback(3, "history:view:" + token, actor=30))
+        self.assertNotIn(secret, str(self.api.await_args_list))
+        self.api.reset_mock()
+        await self.post(self.history_callback(4, "history:view:" + token))
+        text = self.api.await_args_list[-1].args[2]["text"]
+        self.assertIn("&lt;script&gt;", text)
+        self.assertNotIn("<script>", text)
+        self.assertNotIn(secret, "".join(self.store.db.iterdump()))
+
+    async def test_unknown_deleted_message_never_invents_text(self):
+        self.connect_history()
+        self.assertEqual((await self.post(self.deletion(1, [999]))).status, 200)
+        self.assertFalse(main.DELETED_HISTORY.deleted(10))
+        self.assertIn("xotirada yo‘q: 1", self.api.await_args_list[-1].args[2]["text"])
+
+    async def test_history_off_clears_snapshots_and_stops_capture(self):
+        self.connect_history()
+        await self.post(business_update(1, "remember me"))
+        await self.post(self.history_callback(2, "history:off"))
+        self.assertFalse(self.store.history_enabled(10))
+        self.assertFalse(main.DELETED_HISTORY.items)
+        await self.post(business_update(3, "do not remember"))
+        self.assertFalse(main.DELETED_HISTORY.items)
+
+    async def test_own_outgoing_messages_not_archived(self):
+        self.connect_history()
+        await self.post(business_update(1, "own outgoing", sender=10))
+        self.assertFalse(main.DELETED_HISTORY.items)
+
+    async def test_bot_auto_deletions_do_not_trigger_history_notice(self):
+        self.connect_history()
+        self.store.set_auto_delete(10, True)
+        await self.post(business_update(1))
+        self.api.reset_mock()
+        await self.post(self.deletion(2, [1]))
+        self.api.assert_not_awaited()
+        self.assertFalse(main.DELETED_HISTORY.deleted(10))
+
+    async def test_edited_message_snapshot_updated_and_bad_delete_ids_rejected(self):
+        self.connect_history()
+        await self.post(business_update(1, "old text"))
+        edited = business_update(2, "latest text")
+        edited["business_message"]["message_id"] = 1
+        edited["edited_business_message"] = edited.pop("business_message")
+        await self.post(edited)
+        await self.post(self.deletion(3, [1]))
+        self.assertEqual(main.DELETED_HISTORY.deleted(10)[0]["text"], "latest text")
+        for update_id, ids in enumerate(([True], [-1], "1"), 4):
+            self.assertEqual((await self.post(self.deletion(update_id, ids))).status, 400)
+
+    async def test_snapshot_expiry_and_memory_limits(self):
+        history = main.TemporaryMessageHistory(per_owner=2, total=3)
+        for value in range(1, 6):
+            history.remember(10, "c", business_update(value, str(value))["business_message"])
+        self.assertEqual(len(history.items), 2)
+        for value in range(6, 8):
+            history.remember(30, "d", business_update(value, str(value))["business_message"])
+        self.assertEqual(len(history.items), 3)
+        for item in history.items.values():
+            item["expires"] = 0
+        history.prune()
+        self.assertFalse(history.items)
+
+    async def test_notification_limit_does_not_drop_deleted_texts(self):
+        self.connect_history()
+        main.DELETION_NOTICE_LIMITER = main.InteractionLimiter(capacity=1)
+        await self.post(business_update(1, "first"))
+        await self.post(business_update(2, "second"))
+        await self.post(self.deletion(3, [1]))
+        await self.post(self.deletion(4, [2]))
+        notices = [c for c in self.api.await_args_list if c.args[1] == "sendMessage"]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(len(main.DELETED_HISTORY.deleted(10)), 2)
 
     async def test_removed_photo_and_foreign_number_modes_do_nothing(self):
         self.store.save_connection({"id": "c", "user": {"id": 10}, "user_chat_id": 10, "is_enabled": True})

@@ -58,12 +58,14 @@ BUTTON_SCAN = "🔎 Xabarni tekshirish"
 BUTTON_HELP = "ℹ️ Qanday ishlaydi"
 BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
 BUTTON_OUTGOING_WARNING = "⚠️ Yuborilgan xabar ogohlantirishi"
+BUTTON_HISTORY = "📝 O‘chirilgan xabarlar"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
         [BUTTON_SCAN, BUTTON_HELP],
         [BUTTON_DELETE_MODE],
         [BUTTON_OUTGOING_WARNING],
+        [BUTTON_HISTORY],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -73,7 +75,7 @@ MAIN_KEYBOARD = {
 }
 ALLOWED_UPDATES = [
     "message", "business_connection", "business_message",
-    "edited_business_message", "edited_message", "callback_query",
+    "edited_business_message", "edited_message", "callback_query", "deleted_business_messages",
 ]
 
 logging.basicConfig(
@@ -123,6 +125,65 @@ class InteractionLimiter:
 
 
 PRIVATE_LIMITER = InteractionLimiter()
+
+
+class TemporaryMessageHistory:
+    """Opt-in RAM-only snapshots; no message text, file IDs or contents are written to disk."""
+
+    def __init__(self, ttl: float = 3600, per_owner: int = 100, total: int = 2000) -> None:
+        self.ttl, self.per_owner, self.total = ttl, per_owner, total
+        self.items: OrderedDict[tuple[str, int, int], dict[str, Any]] = OrderedDict()
+
+    def prune(self) -> None:
+        now = time.monotonic()
+        for key in [key for key, item in self.items.items() if item["expires"] <= now]:
+            del self.items[key]
+
+    def clear(self, owner: int) -> None:
+        for key in [key for key, item in self.items.items() if item["owner"] == owner]:
+            del self.items[key]
+
+    def remember(self, owner: int, connection: str, message: dict[str, Any], ignored: bool = False) -> None:
+        self.prune()
+        key = (connection, int(message["chat"]["id"]), int(message["message_id"]))
+        previous = self.items.pop(key, None)
+        sender = message.get("from") or {}
+        name = " ".join(str(sender.get(field) or "") for field in ("first_name", "last_name")).strip()
+        name = ("@" + sender["username"]) if sender.get("username") else name or str(sender.get("id") or "Noma’lum")
+        text = message.get("text") or message.get("caption") or "[Matnsiz xabar; media fayli saqlanmagan]"
+        self.items[key] = {
+            "owner": owner, "sender": name[:128], "text": "" if ignored else str(text)[:4096],
+            "expires": time.monotonic() + self.ttl, "deleted": False, "ignored": ignored,
+            "token": previous["token"] if previous else secrets.token_urlsafe(12),
+        }
+        owner_keys = [key for key, item in self.items.items() if item["owner"] == owner]
+        for key in owner_keys[:-self.per_owner]:
+            del self.items[key]
+        while len(self.items) > self.total:
+            self.items.popitem(last=False)
+
+    def mark_deleted(self, owner: int, connection: str, chat_id: int, message_ids: list[int]) -> tuple[int, int]:
+        self.prune()
+        found = missing = 0
+        for message_id in set(message_ids):
+            item = self.items.get((connection, chat_id, message_id))
+            if item is None or item["owner"] != owner:
+                missing += 1
+            elif not item["ignored"] and not item["deleted"]:
+                item["deleted"] = True
+                found += 1
+        return found, missing
+
+    def deleted(self, owner: int) -> list[dict[str, Any]]:
+        self.prune()
+        return [item for item in reversed(self.items.values()) if item["owner"] == owner and item["deleted"]]
+
+    def detail(self, owner: int, token: str) -> dict[str, Any] | None:
+        return next((item for item in self.deleted(owner) if item["token"] == token), None)
+
+
+DELETED_HISTORY = TemporaryMessageHistory()
+DELETION_NOTICE_LIMITER = InteractionLimiter(capacity=6)
 
 URL_RE = re.compile(r"(?i)(?:https?://|www\.)[^\s<>\]\[(){}\"']+|\bt\.me/[^\s<>\]\[(){}\"']+")
 TRAILING_URL_PUNCTUATION = ".,!?;:)]}>'\""
@@ -191,6 +252,8 @@ class Store:
             self.db.execute(
                 "ALTER TABLE user_settings ADD COLUMN outgoing_warning INTEGER NOT NULL DEFAULT 0"
             )
+        if "deleted_history" not in setting_columns:
+            self.db.execute("ALTER TABLE user_settings ADD COLUMN deleted_history INTEGER NOT NULL DEFAULT 0")
         self.db.commit()
 
     def save_connection(self, connection: dict[str, Any]) -> None:
@@ -265,6 +328,18 @@ class Store:
         self.db.execute(
             "INSERT INTO state(key,value) VALUES('update_offset',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(offset),)
+        )
+        self.db.commit()
+
+    def history_enabled(self, owner: int) -> bool:
+        row = self.db.execute("SELECT deleted_history FROM user_settings WHERE owner_user_id=?", (owner,)).fetchone()
+        return bool(row[0]) if row else False
+
+    def set_history(self, owner: int, enabled: bool) -> None:
+        self.db.execute(
+            "INSERT INTO user_settings(owner_user_id,deleted_history) VALUES(?,?) "
+            "ON CONFLICT(owner_user_id) DO UPDATE SET deleted_history=excluded.deleted_history",
+            (owner, int(enabled)),
         )
         self.db.commit()
 
@@ -489,6 +564,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "• <b>🗑 Avto o‘chirish sozlamasi</b> orqali APK/dastur fayllari va barcha havolali xabarlarni o‘chirishni o‘zingiz yoqasiz yoki o‘chirasiz.\n"
             "• <b>⚠️ Yuborilgan xabar ogohlantirishi</b> orqali akkauntingizdan APK yoki shubhali havola ketsa, oluvchiga ogohlantirish yozishni yoqasiz yoki o‘chirasiz.\n"
             "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
+            "• <b>📝 O‘chirilgan xabarlar</b> — o‘zingiz yoqsangiz, kelgan xabar matnini vaqtincha eslab turib, o‘chirilganda ko‘rsatadi.\n\n"
             "<b>Qanday yoqiladi?</b>\n"
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
             "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>barcha xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
@@ -508,6 +584,112 @@ async def send_text(session: aiohttp.ClientSession, chat_id: int, text: str) -> 
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
         "reply_markup": MAIN_KEYBOARD,
+    })
+
+
+async def send_history_menu(session: aiohttp.ClientSession, store: Store, owner: int) -> None:
+    status = "🟢 YOQILGAN" if store.history_enabled(owner) else "⚪ O‘CHIRILGAN"
+    await send_text(session, owner,
+        f"📝 <b>O‘chirilgan xabarlar: {status}</b>\n\n"
+        "Yoqsangiz, bot ruxsat berilgan Business shaxsiy chatlaridan kelgan oxirgi 100 ta xabar "
+        "matnini serverning vaqtinchalik xotirasida 1 soatgacha eslab turadi. Matn bazaga yozilmaydi; "
+        "rasm va fayllar saqlanmaydi. Server qayta ishga tushsa bu xotira yo‘qoladi.\n\n"
+        "Telegram o‘chirish hodisasini yuborsa, oldindan eslab qolingan matnni shu bot chatida ko‘rishingiz mumkin. "
+        "Bot rejim yoqilishidan oldingi yoki botga kelmagan xabarlarni tiklamaydi. "
+        "Butun chat o‘chirilganda hodisa kelishi kafolatlanmaydi; kim o‘chirganini API bildirmaydi.\n\n"
+        "O‘chirsangiz, serverdagi vaqtinchalik nusxalar ham tozalanadi. Bot allaqachon sizga yuborgan "
+        "matnlar Telegram bot chattingizda qoladi.")
+    await api(session, "sendMessage", {
+        "chat_id": owner, "text": "Xabarlarni vaqtincha eslab turishga rozimisiz?",
+        "reply_markup": {"inline_keyboard": [[
+            {"text": "✅ Roziman, yoqish", "callback_data": "history:on"},
+            {"text": "⏸ O‘chirish", "callback_data": "history:off"},
+        ], [{"text": "📖 O‘chirilganlarni ko‘rish", "callback_data": "history:list:0"}],
+        [{"text": "🧹 Vaqtinchalik xotirani tozalash", "callback_data": "history:clear"}]]},
+    })
+
+
+async def send_deleted_list(session: aiohttp.ClientSession, owner: int, page: int = 0) -> None:
+    records = DELETED_HISTORY.deleted(owner)
+    page = max(0, min(page, max(0, (len(records) - 1) // 3)))
+    selected = records[page * 3:page * 3 + 3]
+    if not selected:
+        await send_text(session, owner, "Hozircha vaqtinchalik xotirada o‘chirilgan xabar matni yo‘q.")
+        return
+    lines = ["📝 <b>Bot oldindan ko‘rgan o‘chirilgan xabarlar</b>", ""]
+    buttons = []
+    for index, item in enumerate(selected, page * 3 + 1):
+        lines.append(f"<b>{index}. {html.escape(item['sender'])}</b>\n<pre>{html.escape(item['text'][:160])}</pre>")
+        buttons.append([{"text": f"📖 {index}-xabarni to‘liq ko‘rish", "callback_data": "history:view:" + item["token"]}])
+    navigation = []
+    if page:
+        navigation.append({"text": "⬅️ Oldingi", "callback_data": f"history:list:{page - 1}"})
+    if (page + 1) * 3 < len(records):
+        navigation.append({"text": "Keyingi ➡️", "callback_data": f"history:list:{page + 1}"})
+    if navigation:
+        buttons.append(navigation)
+    await api(session, "sendMessage", {
+        "chat_id": owner, "text": "\n".join(lines), "parse_mode": "HTML",
+        "disable_web_page_preview": True, "reply_markup": {"inline_keyboard": buttons},
+    })
+
+
+async def handle_history_callback(session: aiohttp.ClientSession, store: Store, query: dict[str, Any]) -> None:
+    owner = int(query["from"]["id"])
+    data = str(query.get("data") or "")
+    await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
+    if data == "history:on":
+        if not store.active_connection_id(owner):
+            await send_text(session, owner, "Avval botni Telegram Business orqali shu akkauntingizga ulang.")
+            return
+        store.set_history(owner, True)
+        await send_text(session, owner, "✅ Rejim yoqildi. Endi keladigan xabarlar matni vaqtincha eslab turiladi: 1 soatgacha, oxirgi 100 ta xabar.")
+    elif data in {"history:off", "history:clear"}:
+        if data == "history:off":
+            store.set_history(owner, False)
+        DELETED_HISTORY.clear(owner)
+        await send_text(session, owner, "🧹 Serverdagi vaqtinchalik xotira tozalandi." + (" Rejim o‘chirildi." if data == "history:off" else ""))
+    elif not store.history_enabled(owner):
+        await send_text(session, owner, "Bu rejim o‘chiq. Pastdagi O‘chirilgan xabarlar bo‘limidan yoqing.")
+    elif data.startswith("history:list:"):
+        try:
+            page = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            page = 0
+        await send_deleted_list(session, owner, page)
+    elif data.startswith("history:view:"):
+        item = DELETED_HISTORY.detail(owner, data[len("history:view:"):])
+        if item is None:
+            await send_text(session, owner, "Bu xabar xotirada yo‘q yoki saqlash muddati tugagan.")
+            return
+        for offset in range(0, len(item["text"]), 3000):
+            await send_text(session, owner,
+                f"📝 <b>Yuboruvchi: {html.escape(item['sender'])}</b>\n"
+                f"<pre>{html.escape(item['text'][offset:offset + 3000])}</pre>")
+
+
+async def handle_business_deletions(session: aiohttp.ClientSession, store: Store, event: dict[str, Any]) -> None:
+    connection_id = event["business_connection_id"]
+    connection = store.connection(connection_id)
+    if connection is None:
+        info = await api(session, "getBusinessConnection", {"business_connection_id": connection_id})
+        store.save_connection(info)
+        connection = store.connection(connection_id)
+    if not connection:
+        return
+    owner_chat, owner = connection
+    if not store.history_enabled(owner):
+        return
+    found, missing = DELETED_HISTORY.mark_deleted(owner, connection_id, event["chat"]["id"], event["message_ids"])
+    if not (found or missing) or not DELETION_NOTICE_LIMITER.allow(("deletion", owner)):
+        return
+    text = f"🗑 Suhbatda xabarlar o‘chirildi.\n\nBot oldindan eslab qolgan: {found} ta."
+    if missing:
+        text += f"\nMatni xotirada yo‘q: {missing} ta."
+    text += "\n\nKim o‘chirganini Telegram bildirmaydi."
+    await api(session, "sendMessage", {
+        "chat_id": owner_chat, "text": text,
+        "reply_markup": {"inline_keyboard": [[{"text": "📖 Matnlarni ko‘rish", "callback_data": "history:list:0"}]]},
     })
 
 
@@ -676,6 +858,8 @@ async def handle_keyboard_button(
         await send_delete_mode_menu(session, store, chat_id)
     elif text == BUTTON_OUTGOING_WARNING:
         await send_outgoing_warning_menu(session, store, chat_id)
+    elif text == BUTTON_HISTORY:
+        await send_history_menu(session, store, chat_id)
     else:
         return False
     return True
@@ -873,6 +1057,9 @@ async def delete_incoming_business_message(
 
 
 async def process_update(session: aiohttp.ClientSession, store: Store, update: dict[str, Any]) -> None:
+    if "deleted_business_messages" in update:
+        await handle_business_deletions(session, store, update["deleted_business_messages"])
+        return
     message = update.get("message") or update.get("edited_message")
     if message:
         chat_type = (message.get("chat") or {}).get("type")
@@ -894,12 +1081,17 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         if not isinstance(info, dict) or info.get("id") != connection_id:
             raise TelegramAPIError("Business ulanishini tasdiqlab bo‘lmadi")
         store.save_connection(info)
+        if not info.get("is_enabled"):
+            DELETED_HISTORY.clear(int((info.get("user") or {}).get("id", 0)))
         log.info("Business ulanish holati yangilandi")
         return
 
     if "callback_query" in update:
         query = update["callback_query"]
         data = query.get("data", "")
+        if data.startswith("history:"):
+            await handle_history_callback(session, store, query)
+            return
         if data.startswith(("photo_test:", "unknown_sender:", "trust_sender:")):
             await api(session, "answerCallbackQuery", {
                 "callback_query_id": query["id"], "text": "Bu bo‘lim olib tashlangan.",
@@ -1007,6 +1199,9 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if message.get("sender_business_bot"):
         return
 
+    if sender_id and sender_id != owner_user_id and store.history_enabled(owner_user_id):
+        DELETED_HISTORY.remember(owner_user_id, str(connection_id), message)
+
     result = analyze(message)
     if not result:
         return
@@ -1023,6 +1218,8 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         if reason and await delete_incoming_business_message(
             session, owner_chat_id, str(connection_id), message, reason,
         ):
+            if store.history_enabled(owner_user_id):
+                DELETED_HISTORY.remember(owner_user_id, str(connection_id), message, ignored=True)
             return
 
     await api(session, "sendMessage", {
@@ -1084,6 +1281,15 @@ def validate_update(update: Any) -> None:
     if kind == "business_connection":
         string(value.get("id"), 256)
         return  # Routing and ownership are fetched from Telegram, not this payload.
+    if kind == "deleted_business_messages":
+        string(value.get("business_connection_id"), 256)
+        chat = obj(value.get("chat"))
+        if not integer(chat.get("id")) or chat.get("type") != "private":
+            raise ValueError("Invalid deleted chat")
+        ids = value.get("message_ids")
+        if not isinstance(ids, list) or any(not integer(item, True) for item in ids):
+            raise ValueError("Invalid deleted message ids")
+        return
     if kind == "callback_query":
         string(value.get("id"), 256)
         user(value.get("from"))
@@ -1171,6 +1377,7 @@ async def run_polling(session: aiohttp.ClientSession, store: Store) -> None:
     offset = store.offset()
     while True:
         try:
+            DELETED_HISTORY.prune()
             payload: dict[str, Any] = {"timeout": POLL_TIMEOUT, "allowed_updates": ALLOWED_UPDATES}
             if offset is not None:
                 payload["offset"] = offset
@@ -1289,9 +1496,16 @@ async def run_webhook(session: aiohttp.ClientSession, store: Store) -> None:
         "drop_pending_updates": False,
     })
     log.info("Webhook ishga tushdi: %s%s", external_url, WEBHOOK_PATH)
+    async def expire_history() -> None:
+        while True:
+            await asyncio.sleep(60)
+            DELETED_HISTORY.prune()
+    expiry_task = asyncio.create_task(expire_history())
     try:
         await asyncio.Event().wait()
     finally:
+        expiry_task.cancel()
+        await asyncio.gather(expiry_task, return_exceptions=True)
         await runner.cleanup()
 
 

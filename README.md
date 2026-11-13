@@ -15,9 +15,20 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Rejim yoqilganida APK/ishga tushiriladigan fayllar hamda barcha havolali kiruvchi xabarlar o‘chiriladi. Oddiy, qisqartirilgan va matn ichiga yashirilgan havolalar, shuningdek media izohidagi havolalar ham aniqlanadi. Faqat matnli ogohlantirish iboralari avtomatik o‘chirilmaydi. O‘chirilgan xabar haqida egasiga bot orqali xabar boradi.
 - Pastki menyudagi **⚠️ Yuborilgan xabar ogohlantirishi** orqali egasi akkauntidan APK yoki aniq shubhali havola yuborilganda oluvchiga ogohlantirish yozishni yoqish/o‘chirish mumkin; standart holati o‘chiq.
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
-- Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; xabarlarni saqlamaydi.
+- **📝 O‘chirilgan xabarlar** — foydalanuvchi alohida rozilik bilan yoqsa, Business shaxsiy chatlaridagi oxirgi 100 tagacha kiruvchi xabarning matnini RAM’da 1 soatgacha eslab turadi. `deleted_business_messages` hodisasi kelsa, oldindan ko‘rilgan matnni faqat akkaunt egasiga ko‘rsatadi. Rejim standart holatda o‘chiq.
+- Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; qo‘lda tekshirilgan xabarlar tarixga yozilmaydi.
 - Guruhda APK, ishga tushiriladigan fayl, istalgan havola yoki belgilangan firibgarlik iborasi topilsa, xabarni o‘chiradi va guruhga kim hamda nima yuborganini yozadi.
 - Xabar matnini yoki fayllarni bazada saqlamaydi; tashqi skanerga yubormaydi.
+
+## O‘chirilgan xabarlarni vaqtincha ko‘rish
+
+Pastdagi **📝 O‘chirilgan xabarlar → Roziman, yoqish** orqali ishga tushiriladi. Faqat botga ruxsat berilgan shaxsiy Business chatlaridan keladigan yangi kiruvchi xabarlar eslab turiladi. Sozlama yoqilmasdan oldingi yoki botga umuman kelmagan xabarlar tiklanmaydi. Telegram o‘chirish hodisasida xabar matnini hamda kim o‘chirganini yubormaydi; butun chatni o‘chirish har doim shu hodisani keltirib chiqarmasligi mumkin.
+
+Matnlar disk/bazaga yozilmaydi: RAM’da har egaga 100 tagacha, butun jarayonda 2000 tagacha nusxa, qabul qilingandan keyin 1 soatgacha saqlanadi. Joy to‘lsa eng eski yozuvlar o‘chadi; muddati o‘tgan nusxalar ko‘rsatilmaydi va fon vazifasi har daqiqada tozalaydi. Rasm, APK, video va boshqa fayllar yuklab olinmaydi; matnsiz xabar uchun faqat shunday xabar bo‘lgani ko‘rsatiladi. Yangi xabarlar kelmasa ham vaqt bo‘yicha tozalash davom etadi. Server qayta ishga tushganda RAM yo‘qoladi.
+
+O‘chirish hodisasidan so‘ng bot bildirishnoma yuboradi; **Matnlarni ko‘rish** yoki rejim menyusidagi **O‘chirilganlarni ko‘rish** orqali varaqlanadi. Spamni kamaytirish uchun bir egaga daqiqasiga 6 tagacha o‘chirish bildirishnomasi yuboriladi; ortiqcha hodisalarda ham matnlar cheklovlar doirasida ro‘yxatda ko‘rinadi. Botning o‘zi avto o‘chirgan xabarlari ikkinchi marta bu bildirishnomaga kiritilmaydi.
+
+**O‘chirish** yoki **Vaqtinchalik xotirani tozalash** egasining RAM nusxalarini o‘chiradi. Bot allaqachon egasining Telegram chatiga yuborgan matnlar o‘sha chatda qoladi. Har bir egaga faqat o‘z yozuvlari ochiladi; callback token boshqa egaga matnni ko‘rsatmaydi.
 
 ## Muhim chegaralar
 
