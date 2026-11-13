@@ -14,7 +14,7 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Pastki menyudagi **🗑 Avto o‘chirish sozlamasi** orqali foydalanuvchi Business shaxsiy chatlaridagi zararli xabarlarni avtomatik o‘chirishni yoqishi yoki o‘chirishi mumkin; standart holati o‘chiq.
 - Rejim yoqilganida APK/ishga tushiriladigan fayllar hamda barcha havolali kiruvchi xabarlar o‘chiriladi. Oddiy, qisqartirilgan va matn ichiga yashirilgan havolalar, shuningdek media izohidagi havolalar ham aniqlanadi. Faqat matnli ogohlantirish iboralari avtomatik o‘chirilmaydi. O‘chirilgan xabar haqida egasiga bot orqali xabar boradi.
 - Pastki menyudagi **⚠️ Yuborilgan xabar ogohlantirishi** orqali egasi akkauntidan APK yoki aniq shubhali havola yuborilganda oluvchiga ogohlantirish yozishni yoqish/o‘chirish mumkin; standart holati o‘chiq.
-- Pastki menyudagi **👤 Yangi akkaunt ogohlantirishi** egasiga bot birinchi marta ko‘rayotgan yuboruvchi haqida xabar beradi va xabarda ochiq yozilgan/kontakt sifatida yuborilgan `+998` yoki `+7`dan boshqa xalqaro raqamni aniqlasa bir marta ogohlantiradi. Yangi yuboruvchini **Ishonchli deb belgilash** mumkin; rejim standart holatda yoqilgan.
+- Pastki menyudagi **🌍 Xalqaro raqam ogohlantirishi** xabarda ochiq yozilgan/kontakt sifatida yuborilgan `+998` yoki `+7`dan boshqa xalqaro raqamni aniqlasa bir marta ogohlantiradi. Yangi yuboruvchi uchun alohida bildirishnoma yuborilmaydi.
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
 - Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; xabarlarni saqlamaydi.
 - Guruhda APK, ishga tushiriladigan fayl, istalgan havola yoki belgilangan firibgarlik iborasi topilsa, xabarni o‘chiradi va guruhga kim hamda nima yuborganini yozadi.
@@ -32,7 +32,7 @@ Shaxsiy chatlarda avto o‘chirishni yoqish uchun botda **🗑 Avto o‘chirish 
 
 Yuborilgan xabar ostiga ogohlantirish yozish uchun **⚠️ Yuborilgan xabar ogohlantirishi → ✅ Yoqish**ni tanlang va Telegram Business’da **Javob berish** huquqini bering. Telegram ayrim chatlarda xabar yuborishni cheklashi mumkin.
 
-Yangi yuboruvchi va xalqaro raqam ogohlantirishi **👤 Yangi akkaunt ogohlantirishi** tugmasi orqali boshqariladi. “Yangi akkaunt” degani bot shu yuboruvchidan birinchi marta xabar olganini bildiradi, akkaunt yaqinda ochilganini emas. Telegram Bot API yuboruvchining odatda yashirin telefon raqamini botga bermaydi. Shu sabab faqat xabarda `+` bilan ochiq yozilgan raqamlar, yoki yuborilgan kontaktning raqami tekshiriladi. Kontakt boshqa odamga tegishli bo‘lishi mumkin. Raqamning o‘zi bazada saqlanmaydi; yuboruvchi ID-si va ishonchli/ogohlantirilgan holati saqlanadi.
+Xalqaro raqam ogohlantirishi **🌍 Xalqaro raqam ogohlantirishi** tugmasi orqali boshqariladi. Telegram Bot API odatda yuboruvchining yashirin telefon raqamini botga bermaydi. Shu sabab faqat xabarda `+` bilan ochiq yozilgan raqamlar yoki yuborilgan kontaktning raqami tekshiriladi. Kontakt boshqa odamga tegishli bo‘lishi mumkin. Raqamning o‘zi bazada saqlanmaydi.
 
 ### Guruh moderatsiyasi
 
