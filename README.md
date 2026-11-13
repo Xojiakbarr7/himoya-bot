@@ -12,7 +12,7 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Kod/parol so‘rash yoki shoshiltirishga o‘xshash ayrim o‘zbekcha/ruscha iboralarni aniqlaydi.
 - Xavf belgisi topilganda akkaunt egasining Telegram bot chatiga ogohlantirish yuboradi.
 - Pastki menyudagi **🗑 Avto o‘chirish sozlamasi** orqali foydalanuvchi Business shaxsiy chatlaridagi zararli xabarlarni avtomatik o‘chirishni yoqishi yoki o‘chirishi mumkin; standart holati o‘chiq.
-- Rejim yoqilganida APK/ishga tushiriladigan fayllar hamda aniq shubhali yoki qisqartirilgan havolalar o‘chiriladi. Oddiy havolalar va matnli ogohlantirish iboralari avtomatik o‘chirilmaydi. O‘chirilgan xabar haqida egasiga bot orqali xabar boradi.
+- Rejim yoqilganida APK/ishga tushiriladigan fayllar hamda barcha havolali kiruvchi xabarlar o‘chiriladi. Oddiy, qisqartirilgan va matn ichiga yashirilgan havolalar, shuningdek media izohidagi havolalar ham aniqlanadi. Faqat matnli ogohlantirish iboralari avtomatik o‘chirilmaydi. O‘chirilgan xabar haqida egasiga bot orqali xabar boradi.
 - Pastki menyudagi **⚠️ Yuborilgan xabar ogohlantirishi** orqali egasi akkauntidan APK yoki aniq shubhali havola yuborilganda oluvchiga ogohlantirish yozishni yoqish/o‘chirish mumkin; standart holati o‘chiq.
 - Pastki menyudagi **👤 Yangi akkaunt ogohlantirishi** egasiga bot birinchi marta ko‘rayotgan yuboruvchi haqida xabar beradi va xabarda ochiq yozilgan/kontakt sifatida yuborilgan `+998` yoki `+7`dan boshqa xalqaro raqamni aniqlasa bir marta ogohlantiradi. Yangi yuboruvchini **Ishonchli deb belgilash** mumkin; rejim standart holatda yoqilgan.
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
