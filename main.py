@@ -414,7 +414,7 @@ def analyze(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def business_deletion_reason(message: dict[str, Any], result: dict[str, Any]) -> str:
-    """Return a reason only for actionable harmful items, not ordinary links/text."""
+    """Delete executable files and every detected link when the owner enables the mode."""
     document = message.get("document") or {}
     file_name = str(document.get("file_name") or result.get("file_name") or "").lower()
     mime = str(document.get("mime_type") or "").lower()
@@ -424,8 +424,8 @@ def business_deletion_reason(message: dict[str, Any], result: dict[str, Any]) ->
         "application/x-msdownload", "application/x-executable", "application/java-archive",
     }:
         return "ishga tushiriladigan fayl"
-    if any(int(link.get("score", 0)) >= 35 for link in result.get("links", [])):
-        return "shubhali yoki qisqartirilgan havola"
+    if urls_from_message(message):
+        return "havola"
     return ""
 
 
@@ -473,7 +473,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "APK, havola va firibgarlik belgilarini kuzatishga yordam beradi.\n\n"
             "<b>Afzalliklari</b>\n"
             "• Ruxsat berilgan shaxsiy chatlardagi xavf belgilarini aniqlab, sizga ogohlantirish yuboradi.\n"
-            "• <b>🗑 Avto o‘chirish sozlamasi</b> orqali APK/dastur fayllari va aniq shubhali havolalarni o‘chirishni o‘zingiz yoqasiz yoki o‘chirasiz.\n"
+            "• <b>🗑 Avto o‘chirish sozlamasi</b> orqali APK/dastur fayllari va barcha havolali xabarlarni o‘chirishni o‘zingiz yoqasiz yoki o‘chirasiz.\n"
             "• <b>⚠️ Yuborilgan xabar ogohlantirishi</b> orqali akkauntingizdan APK yoki shubhali havola ketsa, oluvchiga ogohlantirish yozishni yoqasiz yoki o‘chirasiz.\n"
             "• <b>👤 Yangi akkaunt ogohlantirishi</b> orqali bot birinchi marta yozgan yuboruvchini va xabardagi +998/+7 dan boshqa xalqaro raqamni bildiradi.\n"
             "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
@@ -506,8 +506,8 @@ def delete_mode_content(store: Store, owner_user_id: int) -> tuple[str, dict[str
     text = (
         f"🗑 <b>Zararli xabarlarni avtomatik o‘chirish: {status}</b>\n\n"
         "Yoqilganda bot ruxsat berilgan shaxsiy chatlardan kelgan APK/dastur fayllarini "
-        "va aniq shubhali yoki qisqartirilgan havolalarni o‘chiradi, so‘ng sizga xabar beradi. "
-        "Oddiy havolalar o‘chirilmaydi.\n\n"
+        "va barcha havolali xabarlarni o‘chiradi, so‘ng sizga xabar beradi. "
+        "Oddiy, qisqartirilgan va matn ichiga yashirilgan havolalar ham o‘chiriladi.\n\n"
         "Ishlashi uchun Telegram Business’da botga <b>qabul qilingan xabarlarni o‘chirish</b> "
         "huquqini bering. APK faylni antivirus kabi tekshirmaydi."
     )
@@ -817,7 +817,7 @@ async def delete_incoming_business_message(
             await send_text(
                 session,
                 owner_chat_id,
-                "⚠️ Xavfli xabar aniqlandi, lekin Telegram uni o‘chirishga ruxsat bermadi. "
+                "⚠️ APK/dastur fayli yoki havola aniqlandi, lekin Telegram xabarni o‘chirishga ruxsat bermadi. "
                 "Telegram Business → Chatbots → Qalqon AI bo‘limida "
                 "<b>qabul qilingan xabarlarni o‘chirish</b> huquqini yoqing.",
             )
@@ -833,7 +833,7 @@ async def delete_incoming_business_message(
         await send_text(
             session,
             owner_chat_id,
-            "🗑 <b>Xavfli xabar o‘chirildi.</b>\n\n"
+            "🗑 <b>Xabar o‘chirildi.</b>\n\n"
             f"Yuboruvchi: {sender_label}\nAniqlangan: {html.escape(reason)}\n\n"
             "APK yoki havolani bot ochmadi va faylni yuklab olmadi.",
         )
