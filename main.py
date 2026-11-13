@@ -171,6 +171,13 @@ class Store:
         ).fetchone()
         return bool(row[0]) if row else False
 
+    def active_connection_id(self, owner_user_id: int) -> str | None:
+        row = self.db.execute(
+            "SELECT connection_id FROM connections WHERE owner_user_id=? AND enabled=1 ORDER BY rowid DESC LIMIT 1",
+            (int(owner_user_id),),
+        ).fetchone()
+        return str(row[0]) if row else None
+
     def set_auto_delete(self, owner_user_id: int, enabled: bool) -> None:
         self.db.execute(
             "INSERT INTO user_settings(owner_user_id, auto_delete_harmful) VALUES(?,?) "
@@ -479,7 +486,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
             "<b>Qanday yoqiladi?</b>\n"
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
-            "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>qabul qilingan xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
+            "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>barcha xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
             "3. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
             "⚠️ Bot APK faylni antivirus kabi tekshirmaydi; xavf belgilariga qarab ogohlantiradi. Xabar matnlari bazada saqlanmaydi, fayllar yuklab olinmaydi."
             " Telegram odatda yuboruvchining telefon raqamini botga ko‘rsatmaydi; faqat xabarda ochiq yozilgan yoki kontakt qilib yuborilgan raqam tekshiriladi."
@@ -508,7 +515,7 @@ def delete_mode_content(store: Store, owner_user_id: int) -> tuple[str, dict[str
         "Yoqilganda bot ruxsat berilgan shaxsiy chatlardan kelgan APK/dastur fayllarini "
         "va barcha havolali xabarlarni o‘chiradi, so‘ng sizga xabar beradi. "
         "Oddiy, qisqartirilgan va matn ichiga yashirilgan havolalar ham o‘chiriladi.\n\n"
-        "Ishlashi uchun Telegram Business’da botga <b>qabul qilingan xabarlarni o‘chirish</b> "
+        "Ishlashi uchun Telegram Business’da botga <b>barcha xabarlarni o‘chirish</b> "
         "huquqini bering. APK faylni antivirus kabi tekshirmaydi."
     )
     keyboard = {"inline_keyboard": [[
@@ -522,6 +529,8 @@ async def send_delete_mode_menu(
     session: aiohttp.ClientSession, store: Store, chat_id: int,
 ) -> None:
     text, keyboard = delete_mode_content(store, chat_id)
+    allowed, permission_text = await check_delete_permission(session, store, chat_id)
+    text += "\n\n" + permission_text
     await api(session, "sendMessage", {
         "chat_id": chat_id,
         "text": text,
@@ -529,6 +538,29 @@ async def send_delete_mode_menu(
         "reply_markup": keyboard,
         "disable_web_page_preview": True,
     })
+
+
+async def check_delete_permission(
+    session: aiohttp.ClientSession, store: Store, owner_user_id: int,
+) -> tuple[bool, str]:
+    connection_id = store.active_connection_id(owner_user_id)
+    if not connection_id:
+        return False, "🔌 Botga Telegram Business ulanishi kelmagan. Botni akkauntingizga ulang yoki qayta ulang."
+    try:
+        connection = await api(session, "getBusinessConnection", {"business_connection_id": connection_id})
+        store.save_connection(connection)
+    except TelegramAPIError as exc:
+        log.warning("O‘chirish ruxsatini tekshira olmadim: %s", exc)
+        return False, "⚠️ Ulanish ruxsatini tekshirib bo‘lmadi. Telegram Business’da botni qayta ulang."
+    if not connection.get("is_enabled"):
+        return False, "🔌 Telegram Business ulanishi o‘chirilgan. Botni qayta ulang."
+    if not (connection.get("rights") or {}).get("can_delete_all_messages"):
+        return False, (
+            "🔴 Telegram’da <b>Barcha xabarlarni o‘chirish / Delete all messages</b> ruxsati yo‘q. "
+            "Sozlamalar → Telegram Business → Chatbots → Qalqon AI bo‘limida shu ruxsatni yoqing "
+            "va saqlang. Faqat bot yuborgan xabarlarni o‘chirish ruxsati yetmaydi."
+        )
+    return True, "🟢 Telegram’dagi barcha xabarlarni o‘chirish ruxsati mavjud."
 
 
 def outgoing_warning_content(store: Store, owner_user_id: int) -> tuple[str, dict[str, Any]]:
@@ -819,7 +851,7 @@ async def delete_incoming_business_message(
                 owner_chat_id,
                 "⚠️ APK/dastur fayli yoki havola aniqlandi, lekin Telegram xabarni o‘chirishga ruxsat bermadi. "
                 "Telegram Business → Chatbots → Qalqon AI bo‘limida "
-                "<b>qabul qilingan xabarlarni o‘chirish</b> huquqini yoqing.",
+                "<b>barcha xabarlarni o‘chirish</b> huquqini yoqing.",
             )
         except TelegramAPIError as notify_exc:
             log.warning("O‘chirish huquqi haqida egaga xabar yuborilmadi: %s", notify_exc)
@@ -934,6 +966,16 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
                 store.set_unknown_sender_warning(callback_user_id, enabled)
                 text, keyboard = unknown_sender_content(store, callback_user_id)
             else:
+                if enabled:
+                    allowed, permission_text = await check_delete_permission(session, store, callback_user_id)
+                    if not allowed:
+                        await api(session, "answerCallbackQuery", {
+                            "callback_query_id": query["id"],
+                            "text": "O‘chirish ruxsati yo‘q yoki ulanish tekshirilmadi. Bot yuborgan ko‘rsatmani o‘qing.",
+                            "show_alert": True,
+                        })
+                        await send_text(session, callback_chat_id, permission_text)
+                        return
                 store.set_auto_delete(callback_user_id, enabled)
                 text, keyboard = delete_mode_content(store, callback_user_id)
             await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
