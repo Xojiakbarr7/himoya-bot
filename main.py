@@ -1641,6 +1641,9 @@ async def run() -> None:
     history_url = os.environ.get("HISTORY_DATABASE_URL", "").strip()
     if history_url:
         DELETED_HISTORY = PostgresMessageHistory(history_url)
+        log.info("History storage: PostgreSQL connected; schema and cleanup verified")
+    else:
+        log.warning("History storage: RAM only; HISTORY_DATABASE_URL is not configured")
     if not re.fullmatch(r"[0-9]{6,}:[A-Za-z0-9_-]{20,}", BOT_TOKEN):
         raise SystemExit("BOT_TOKEN topilmadi yoki formati noto‘g‘ri. Render maxfiy sozlamasini tekshiring.")
     store = Store(DB_PATH)
