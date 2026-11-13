@@ -223,7 +223,7 @@ class PostgresMessageHistory:
 
     def _execute(self, statements):
         try:
-            with self.driver.connect(self.url, connect_timeout=30, sslmode="require", options="-c statement_timeout=10000") as connection:
+            with self.driver.connect(self.url, connect_timeout=30, sslmode="require") as connection:
                 result = []
                 for sql, values in statements:
                     cursor = connection.execute(sql, values)
