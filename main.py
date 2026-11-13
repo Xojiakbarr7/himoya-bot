@@ -202,7 +202,9 @@ class TemporaryMessageHistory:
 
     def deleted(self, owner: int) -> list[dict[str, Any]]:
         self.prune()
-        return [item for item in reversed(self.items.values()) if item["owner"] == owner and item["deleted"]]
+        return [dict(item, chat_id=key[1], connection=key[0])
+                for key, item in reversed(self.items.items())
+                if item["owner"] == owner and item["deleted"]]
 
     def detail(self, owner: int, token: str) -> dict[str, Any] | None:
         return next((item for item in self.deleted(owner) if item["token"] == token), None)
@@ -302,8 +304,9 @@ class PostgresMessageHistory:
         return found, missing
 
     def deleted(self, owner):
-        rows = self._execute([("SELECT payload FROM qalqon_history WHERE owner=%s AND expires>%s ORDER BY expires DESC", (owner, time.time()))])
-        return [item for row in rows if (item := json.loads(row[0]))["deleted"]]
+        rows = self._execute([("SELECT chat,connection,payload FROM qalqon_history WHERE owner=%s AND expires>%s ORDER BY expires DESC", (owner, time.time()))])
+        return [dict(item, chat_id=row[0], connection=row[1])
+                for row in rows if (item := json.loads(row[2]))["deleted"]]
 
     def detail(self, owner, token):
         return next((item for item in self.deleted(owner) if item["token"] == token), None)
@@ -798,8 +801,39 @@ async def send_deleted_item(session: aiohttp.ClientSession, owner: int, item: di
         await send_text(session, owner, "⚠️ Xabardagi mediani qayta yuborib bo‘lmadi; Telegram faylga ruxsat bermadi.")
 
 
-async def send_all_deleted(session: aiohttp.ClientSession, owner: int) -> None:
+async def send_deleted_chats(session: aiohttp.ClientSession, owner: int, page: int = 0) -> None:
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for item in DELETED_HISTORY.deleted(owner):
+        grouped.setdefault(int(item["chat_id"]), []).append(item)
+    chats = list(grouped.items())
+    if not chats:
+        await send_text(session, owner, "Hozircha tanlash uchun o‘chirilgan chat yo‘q.")
+        return
+    page_size = 10
+    page = max(0, min(page, max(0, (len(chats) - 1) // page_size)))
+    selected = chats[page * page_size:page * page_size + page_size]
+    rows = []
+    for chat_id, items in selected:
+        latest = items[0]
+        label = html.escape(latest["sender"][:30])
+        rows.append([{"text": f"💬 {label} · {len(items)} ta xabar", "callback_data": f"history:chat:{chat_id}"}])
+    nav = []
+    if page:
+        nav.append({"text": "⬅️ Oldingi", "callback_data": f"history:chats:{page - 1}"})
+    if (page + 1) * page_size < len(chats):
+        nav.append({"text": "Keyingi ➡️", "callback_data": f"history:chats:{page + 1}"})
+    if nav:
+        rows.append(nav)
+    await api(session, "sendMessage", {
+        "chat_id": owner, "text": "💬 <b>Qaysi chatdan o‘chirilgan xabarlarni ko‘rmoqchisiz?</b>",
+        "parse_mode": "HTML", "reply_markup": {"inline_keyboard": rows},
+    })
+
+
+async def send_all_deleted(session: aiohttp.ClientSession, owner: int, chat_id: int | None = None) -> None:
     records = DELETED_HISTORY.deleted(owner)
+    if chat_id is not None:
+        records = [item for item in records if int(item["chat_id"]) == chat_id]
     if not records:
         await send_text(session, owner, "Hozircha ko‘rsatadigan o‘chirilgan xabar yo‘q.")
         return
@@ -855,8 +889,23 @@ async def handle_history_callback(session: aiohttp.ClientSession, store: Store, 
         except ValueError:
             page = 0
         await send_deleted_list(session, owner, page)
+    elif data.startswith("history:chats:"):
+        try:
+            page = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            page = 0
+        await send_deleted_chats(session, owner, page)
+    elif data.startswith("history:chat:"):
+        try:
+            chat_id = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            chat_id = 0
+        if not any(int(item["chat_id"]) == chat_id for item in DELETED_HISTORY.deleted(owner)):
+            await send_text(session, owner, "Bu chatda ko‘rsatadigan o‘chirilgan xabar topilmadi.")
+            return
+        await send_all_deleted(session, owner, chat_id)
     elif data == "history:all":
-        await send_all_deleted(session, owner)
+        await send_deleted_chats(session, owner)
     elif data.startswith("history:batch:"):
         try:
             page = int(data.rsplit(":", 1)[1])
@@ -896,7 +945,7 @@ async def handle_business_deletions(session: aiohttp.ClientSession, store: Store
     text += "\n\nKim o‘chirganini Telegram bildirmaydi."
     await api(session, "sendMessage", {
         "chat_id": owner_chat, "text": text,
-        "reply_markup": {"inline_keyboard": [[{"text": "📨 O‘chirilgan xabarlarning barchasini ko‘rish", "callback_data": "history:all"}]]},
+        "reply_markup": {"inline_keyboard": [[{"text": "💬 Chatni tanlab, xabarlarni ko‘rish", "callback_data": "history:chats:0"}]]},
     })
 
 
