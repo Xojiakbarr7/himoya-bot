@@ -745,27 +745,56 @@ async def send_history_menu(session: aiohttp.ClientSession, store: Store, owner:
 
 async def send_deleted_list(session: aiohttp.ClientSession, owner: int, page: int = 0) -> None:
     records = DELETED_HISTORY.deleted(owner)
-    page = max(0, min(page, max(0, (len(records) - 1) // 3)))
-    selected = records[page * 3:page * 3 + 3]
+    page_size = 10
+    page = max(0, min(page, max(0, (len(records) - 1) // page_size)))
+    selected = records[page * page_size:page * page_size + page_size]
     if not selected:
-        await send_text(session, owner, "Hozircha vaqtinchalik xotirada o‘chirilgan xabar matni yo‘q.")
+        await send_text(session, owner, "Hozircha vaqtinchalik xotirada o‘chirilgan xabar yo‘q.")
         return
-    lines = ["📝 <b>Bot oldindan ko‘rgan o‘chirilgan xabarlar</b>", ""]
-    buttons = []
-    for index, item in enumerate(selected, page * 3 + 1):
-        lines.append(f"<b>{index}. {html.escape(item['sender'])}</b>\n<pre>{html.escape(item['text'][:160])}</pre>")
-        buttons.append([{"text": f"📖 {index}-xabarni to‘liq ko‘rish", "callback_data": "history:view:" + item["token"]}])
+    lines = ["📝 <b>O‘chirilgan xabarlar</b>", f"{page * page_size + 1}–{page * page_size + len(selected)} / {len(records)}", ""]
+    for index, item in enumerate(selected, page * page_size + 1):
+        preview = item["text"][:110] or "[Matn yo‘q]"
+        if item.get("media"):
+            preview = "📎 " + item["media"]["kind"] + " · " + preview
+        lines.append(f"<b>{index}. {html.escape(item['sender'])}</b> — {html.escape(preview)}")
+    buttons = [[{"text": "📨 Shu 10 ta xabarni yuborish", "callback_data": f"history:batch:{page}"}]]
     navigation = []
     if page:
-        navigation.append({"text": "⬅️ Oldingi", "callback_data": f"history:list:{page - 1}"})
-    if (page + 1) * 3 < len(records):
-        navigation.append({"text": "Keyingi ➡️", "callback_data": f"history:list:{page + 1}"})
+        navigation.append({"text": "⬅️ Oldingi 10 ta", "callback_data": f"history:list:{page - 1}"})
+    if (page + 1) * page_size < len(records):
+        navigation.append({"text": "Keyingi 10 ta ➡️", "callback_data": f"history:list:{page + 1}"})
     if navigation:
         buttons.append(navigation)
     await api(session, "sendMessage", {
         "chat_id": owner, "text": "\n".join(lines), "parse_mode": "HTML",
         "disable_web_page_preview": True, "reply_markup": {"inline_keyboard": buttons},
     })
+
+
+async def send_deleted_item(session: aiohttp.ClientSession, owner: int, item: dict[str, Any]) -> None:
+    media = item.get("media")
+    body = item.get("text") or "[Matn yo‘q]"
+    heading = f"📝 <b>{html.escape(item['sender'])}</b>\n"
+    try:
+        if media:
+            field = media["kind"]
+            await api(session, MEDIA_METHODS[field], {
+                "chat_id": owner, field: media["file_id"],
+                "caption": (heading + html.escape(body))[:1000],
+                "parse_mode": "HTML", "protect_content": True,
+            })
+        else:
+            for offset in range(0, len(body), 3000):
+                await api(session, "sendMessage", {
+                    "chat_id": owner,
+                    "text": heading + "<pre>" + html.escape(body[offset:offset + 3000]) + "</pre>",
+                    "parse_mode": "HTML", "protect_content": True,
+                    "disable_web_page_preview": True,
+                })
+    except TelegramAPIError as exc:
+        if isinstance(exc, TelegramTemporaryError):
+            raise
+        await send_text(session, owner, "⚠️ Xabardagi mediani qayta yuborib bo‘lmadi; Telegram faylga ruxsat bermadi.")
 
 
 async def handle_history_callback(session: aiohttp.ClientSession, store: Store, query: dict[str, Any]) -> None:
@@ -791,25 +820,22 @@ async def handle_history_callback(session: aiohttp.ClientSession, store: Store, 
         except ValueError:
             page = 0
         await send_deleted_list(session, owner, page)
+    elif data.startswith("history:batch:"):
+        try:
+            page = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            page = 0
+        if page < 0:
+            page = 0
+        records = DELETED_HISTORY.deleted(owner)
+        for item in records[page * 10:page * 10 + 10]:
+            await send_deleted_item(session, owner, item)
     elif data.startswith("history:view:"):
         item = DELETED_HISTORY.detail(owner, data[len("history:view:"):])
         if item is None:
             await send_text(session, owner, "Bu xabar xotirada yo‘q yoki saqlash muddati tugagan.")
             return
-        media = item.get("media")
-        if media:
-            try:
-                await api(session, MEDIA_METHODS[media["kind"]], {
-                    "chat_id": owner, media["kind"]: media["file_id"], "protect_content": True,
-                })
-            except TelegramAPIError as exc:
-                if isinstance(exc, TelegramTemporaryError):
-                    raise
-                await send_text(session, owner, "Telegram bu mediani qayta yuborishga ruxsat bermadi yoki fayl endi mavjud emas.")
-        for offset in range(0, len(item["text"]), 3000):
-            await send_text(session, owner,
-                f"📝 <b>Yuboruvchi: {html.escape(item['sender'])}</b>\n"
-                f"<pre>{html.escape(item['text'][offset:offset + 3000])}</pre>")
+        await send_deleted_item(session, owner, item)
 
 
 async def handle_business_deletions(session: aiohttp.ClientSession, store: Store, event: dict[str, Any]) -> None:
