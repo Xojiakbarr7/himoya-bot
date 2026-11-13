@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict, deque
 import html
+import hashlib
 import ipaddress
 import json
 import logging
@@ -59,6 +60,7 @@ BUTTON_HELP = "ℹ️ Qanday ishlaydi"
 BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
 BUTTON_OUTGOING_WARNING = "⚠️ Yuborilgan xabar ogohlantirishi"
 BUTTON_UNKNOWN_SENDER = "🌍 Xalqaro raqam ogohlantirishi"
+BUTTON_PHOTO_TEST = "🧪 O‘z rasmlarimni sinash"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
@@ -66,6 +68,7 @@ MAIN_KEYBOARD = {
         [BUTTON_DELETE_MODE],
         [BUTTON_OUTGOING_WARNING],
         [BUTTON_UNKNOWN_SENDER],
+        [BUTTON_PHOTO_TEST],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -171,6 +174,11 @@ class Store:
             "update_id INTEGER PRIMARY KEY, processed_at INTEGER NOT NULL)"
         )
         self.db.execute("CREATE INDEX IF NOT EXISTS processed_updates_age ON processed_updates(processed_at)")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS photo_tests ("
+            "token_hash TEXT PRIMARY KEY, owner INTEGER NOT NULL, sender INTEGER, "
+            "expires INTEGER NOT NULL, approved INTEGER NOT NULL DEFAULT 0, remaining INTEGER NOT NULL DEFAULT 1)"
+        )
         self.db.execute("DELETE FROM processed_updates WHERE processed_at < ?", (int(time.time()) - 172800,))
         self._processed_since_cleanup = 0
         self.db.execute(
@@ -325,6 +333,64 @@ class Store:
         self.db.execute(
             "INSERT INTO state(key,value) VALUES('update_offset',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(offset),)
+        )
+        self.db.commit()
+
+    def new_photo_test(self, owner: int) -> str:
+        token = secrets.token_urlsafe(24)
+        self.db.execute("DELETE FROM photo_tests WHERE owner=? OR expires<=?", (owner, int(time.time())))
+        self.db.execute(
+            "INSERT INTO photo_tests(token_hash,owner,expires) VALUES(?,?,?)",
+            (hashlib.sha256(token.encode()).hexdigest(), owner, int(time.time()) + 900),
+        )
+        self.db.commit()
+        return token
+
+    def photo_invite(self, token: str) -> tuple[int, int | None, int] | None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32}", token):
+            return None
+        row = self.db.execute(
+            "SELECT owner,sender,approved FROM photo_tests WHERE token_hash=? AND expires>? AND remaining=1",
+            (hashlib.sha256(token.encode()).hexdigest(), int(time.time())),
+        ).fetchone()
+        return (int(row[0]), int(row[1]) if row[1] else None, int(row[2])) if row else None
+
+    def approve_photo_test(self, token: str, sender: int) -> int | None:
+        invite = self.photo_invite(token)
+        if not invite or invite[0] == sender or invite[2]:
+            return None
+        cursor = self.db.execute(
+            "UPDATE photo_tests SET sender=?,approved=1 WHERE token_hash=? AND approved=0 AND remaining=1 AND expires>?",
+            (sender, hashlib.sha256(token.encode()).hexdigest(), int(time.time())),
+        )
+        self.db.commit()
+        return invite[0] if cursor.rowcount == 1 else None
+
+    def claim_photo_test(self, owner: int, sender: int) -> str | None:
+        row = self.db.execute(
+            "SELECT token_hash FROM photo_tests WHERE owner=? AND sender=? AND approved=1 AND remaining=1 AND expires>?",
+            (owner, sender, int(time.time())),
+        ).fetchone()
+        if not row:
+            return None
+        cursor = self.db.execute("UPDATE photo_tests SET remaining=0 WHERE token_hash=? AND remaining=1", (row[0],))
+        self.db.commit()
+        return str(row[0]) if cursor.rowcount == 1 else None
+
+    def retry_photo_test(self, token_hash: str) -> None:
+        self.db.execute("UPDATE photo_tests SET remaining=1 WHERE token_hash=? AND expires>?", (token_hash, int(time.time())))
+        self.db.commit()
+
+    def stop_photo_tests(self, user_id: int) -> None:
+        self.db.execute("UPDATE photo_tests SET remaining=0 WHERE owner=? OR sender=?", (user_id, user_id))
+        self.db.commit()
+
+    def decline_photo_test(self, token: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32}", token):
+            return
+        self.db.execute(
+            "UPDATE photo_tests SET remaining=0 WHERE token_hash=? AND approved=0",
+            (hashlib.sha256(token.encode()).hexdigest(),),
         )
         self.db.commit()
 
@@ -607,6 +673,119 @@ async def send_text(session: aiohttp.ClientSession, chat_id: int, text: str) -> 
     })
 
 
+async def send_photo_test_menu(session: aiohttp.ClientSession, chat_id: int) -> None:
+    await send_text(session, chat_id,
+        "🧪 <b>Ikki akkaunt bilan rasm sinovi</b>\n\n"
+        "Bu rejim odatda o‘chiq. Sinov havolasini o‘zingizning ikkinchi akkauntingizda ochib, "
+        "rasm nusxasini birinchi akkauntga yuborishga alohida rozilik bering.\n\n"
+        "Sinov 15 daqiqa va faqat bitta rasm uchun amal qiladi. Rasm botga Telegram API orqali "
+        "kelgan bo‘lsa, nusxasi yuboriladi. Bir martalik rasmni Telegram botga bermasligi mumkin; "
+        "bu rejim Telegram cheklovlarini chetlab o‘tmaydi. Fayl serverga yuklab olinmaydi.")
+    await api(session, "sendMessage", {
+        "chat_id": chat_id, "text": "Sinovni boshqarish:",
+        "reply_markup": {"inline_keyboard": [[
+            {"text": "🔗 Sinov havolasini olish", "callback_data": "photo_test:new"},
+        ], [{"text": "⏹ Sinovni to‘xtatish", "callback_data": "photo_test:stop"}]]},
+    })
+
+
+async def open_photo_test_invite(
+    session: aiohttp.ClientSession, store: Store, message: dict[str, Any],
+) -> bool:
+    parts = str(message.get("text") or "").split()
+    if len(parts) != 2 or parts[0].split("@", 1)[0] != "/start" or not parts[1].startswith("photo_test_"):
+        return False
+    actor = int(message["chat"]["id"])
+    token = parts[1][len("photo_test_"):]
+    invite = store.photo_invite(token)
+    if not invite or invite[2] or invite[0] == actor:
+        await send_text(session, actor, "Sinov havolasi eskirgan, ishlatilgan yoki boshqa akkauntda ochilishi kerak.")
+        return True
+    await send_text(session, actor,
+        "🧪 <b>Rasm nusxasini yuborishga rozilik</b>\n\n"
+        f"Qabul qiluvchi akkaunt ID: <code>{invite[0]}</code>\n\n"
+        "Tasdiqlasangiz, shu akkauntga keyin yuboradigan <b>bitta rasmingiz</b> bot orqali "
+        "uning shaxsiy bot chatiga nusxalanishi mumkin. Sinov 15 daqiqada tugaydi. "
+        "Faqat ikkala akkaunt ham sizniki bo‘lsa va shu nusxani olishga rozi bo‘lsangiz tasdiqlang.")
+    await api(session, "sendMessage", {
+        "chat_id": actor, "text": "Rasmingiz nusxalanishiga rozimisiz?",
+        "reply_markup": {"inline_keyboard": [[
+            {"text": "✅ Roziman", "callback_data": f"photo_test:yes:{token}"},
+            {"text": "❌ Yo‘q", "callback_data": f"photo_test:no:{token}"},
+        ]]},
+    })
+    return True
+
+
+async def handle_photo_test_callback(
+    session: aiohttp.ClientSession, store: Store, query: dict[str, Any],
+) -> None:
+    actor = int(query["from"]["id"])
+    data = str(query.get("data") or "")
+    # Acknowledge a real Telegram callback before changing consent state.
+    await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
+    if data == "photo_test:stop":
+        store.stop_photo_tests(actor)
+        await send_text(session, actor, "⏹ Siz qatnashgan rasm sinovlari to‘xtatildi.")
+    elif data.startswith("photo_test:no:"):
+        store.decline_photo_test(data[len("photo_test:no:"):])
+        await send_text(session, actor, "⏹ Rozilik berilmadi. Sinov bekor qilindi.")
+    elif data == "photo_test:new":
+        if not store.active_connection_id(actor):
+            await send_text(session, actor, "Avval shu akkauntga botni Telegram Business orqali ulang.")
+            return
+        me = await api(session, "getMe")
+        username = str(me.get("username") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+            await send_text(session, actor, "Bot havolasini yaratib bo‘lmadi. Keyinroq urinib ko‘ring.")
+            return
+        token = store.new_photo_test(actor)
+        await send_text(session, actor,
+            "🔗 Havolani <b>o‘zingizning ikkinchi akkauntingizda</b> ochib, rozilikni tasdiqlang:\n\n"
+            f"https://t.me/{username}?start=photo_test_{token}\n\n"
+            "Keyin ikkinchi akkauntdan shu Business akkauntingizga bitta rasm yuboring. "
+            "Bu chat botga ruxsat berilgan chatlar ichida bo‘lishi kerak. Havola 15 daqiqada eskiradi.")
+    elif data.startswith("photo_test:yes:"):
+        token = data[len("photo_test:yes:"):]
+        owner = store.approve_photo_test(token, actor)
+        if owner is None:
+            await send_text(session, actor, "Havola eskirgan yoki ishlatilgan. Yangi sinov havolasi kerak.")
+            return
+        await send_text(session, actor, "✅ Rozilik qayd etildi. Endi o‘zingizning birinchi akkauntingizga bitta sinov rasmi yuboring.")
+        await send_text(session, owner,
+            f"✅ <code>{actor}</code> akkaunti bitta rasm nusxasi uchun rozilik berdi. "
+            "Sinov havola yaratilganidan 15 daqiqa o‘tgach avtomatik tugaydi.")
+
+
+async def try_consented_photo_test(
+    session: aiohttp.ClientSession, store: Store, message: dict[str, Any],
+    owner_chat_id: int, owner_user_id: int,
+) -> None:
+    photos = message.get("photo")
+    sender = (message.get("from") or {}).get("id")
+    if not isinstance(photos, list) or not photos or not sender or sender == owner_user_id:
+        return
+    token_hash = store.claim_photo_test(owner_user_id, int(sender))
+    if not token_hash:
+        return
+    file_id = photos[-1].get("file_id")
+    if not isinstance(file_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{10,1024}", file_id):
+        await send_text(session, owner_chat_id, "🧪 Rasm xabari keldi, lekin Telegram qayta yuborish uchun fayl ID bermadi. Sinov tugadi.")
+        return
+    try:
+        await api(session, "sendPhoto", {
+            "chat_id": owner_chat_id, "photo": file_id,
+            "caption": "🧪 Ikki akkaunt roziligi bilan sinov nusxasi. Sinov tugadi.",
+            "reply_markup": MAIN_KEYBOARD,
+        })
+    except TelegramTemporaryError:
+        store.retry_photo_test(token_hash)
+        raise
+    except TelegramAPIError:
+        await send_text(session, owner_chat_id,
+            "🧪 Telegram bu rasmni qayta yuborishga ruxsat bermadi. Rasm serverga yuklab olinmadi. Sinov tugadi.")
+
+
 def delete_mode_content(store: Store, owner_user_id: int) -> tuple[str, dict[str, Any]]:
     enabled = store.auto_delete_enabled(owner_user_id)
     status = "🟢 YOQILGAN" if enabled else "⚪ O‘CHIRILGAN"
@@ -804,6 +983,8 @@ async def handle_keyboard_button(
         await send_outgoing_warning_menu(session, store, chat_id)
     elif text in {BUTTON_UNKNOWN_SENDER, "👤 Yangi akkaunt ogohlantirishi"}:
         await send_unknown_sender_menu(session, store, chat_id)
+    elif text == BUTTON_PHOTO_TEST:
+        await send_photo_test_menu(session, chat_id)
     else:
         return False
     return True
@@ -1009,7 +1190,8 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
             return
         text = str(message.get("text") or "")
         if text.startswith("/"):
-            await handle_command(session, message)
+            if not await open_photo_test_invite(session, store, message):
+                await handle_command(session, message)
         else:
             handled = await handle_keyboard_button(session, store, message)
             if not handled:
@@ -1028,6 +1210,9 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if "callback_query" in update:
         query = update["callback_query"]
         data = query.get("data", "")
+        if data.startswith("photo_test:"):
+            await handle_photo_test_callback(session, store, query)
+            return
         if data.startswith("trust_sender:"):
             await api(session, "answerCallbackQuery", {
                 "callback_query_id": query["id"],
@@ -1140,6 +1325,8 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     sender_id = (message.get("from") or {}).get("id")
     if message.get("sender_business_bot"):
         return
+
+    await try_consented_photo_test(session, store, message, owner_chat_id, owner_user_id)
 
     # Only visible international numbers trigger this optional alert.
     if (
@@ -1270,6 +1457,13 @@ def validate_update(update: Any) -> None:
     for key in ("document", "contact", "sender_chat", "sender_business_bot"):
         if key in value:
             obj(value[key])
+    if "photo" in value:
+        if not isinstance(value["photo"], list):
+            raise ValueError("Invalid photos")
+        for photo in value["photo"]:
+            photo = obj(photo)
+            if "file_id" in photo:
+                string(photo["file_id"], 1024)
     for key, fields in (("document", ("file_name", "mime_type")), ("contact", ("phone_number",))):
         for field in fields:
             if field in value.get(key, {}):

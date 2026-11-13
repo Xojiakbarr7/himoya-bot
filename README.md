@@ -79,3 +79,9 @@ Avto o‘chirish uchun Telegram Business’dagi `can_delete_all_messages`, yubor
 Webhook autentifikatsiyasi, kiruvchi ma’lumot tekshiruvi, takrorlarni bloklash, shaxsiy spam cheklovi va maxfiy log formati qo‘shilgan. To‘liq amaliy ko‘rsatma va hosting cheklovlari: [SECURITY.md](SECURITY.md).
 
 Sinov: `python -m unittest -v test_security`.
+
+## Ikki akkaunt roziligi bilan bitta rasm sinovi
+
+**🧪 O‘z rasmlarimni sinash** tugmasi odatda o‘chiq bo‘lgan, 15 daqiqalik bitta rasm sinovini yaratadi. Bot Telegram Business orqali qabul qiluvchi akkauntga ulangan bo‘lishi kerak. Qabul qiluvchi sinov havolasini o‘zining ikkinchi akkauntida ochadi va yuboruvchi akkaunt alohida **Roziman**ni bosadi. Faqat shundan keyin shu yuboruvchidan kelgan bitta `photo` xabari Telegram API qayta ishlatishga ruxsat bergan `file_id` bilan egasining bot chatiga nusxalanadi. Fayl yuklab olinmaydi, `file_id` bazada saqlanmaydi; taklif tokenining faqat xeshi va rozilik holati saqlanadi.
+
+Bu bir martalik rasmlarni ochish yoki ularning himoyasini chetlab o‘tish mexanizmi emas. Telegram bunday rasmni botga `photo/file_id` ko‘rinishida bermasa yoki qayta yuborishni rad etsa, nusxa yuborilmaydi. Haqiqiy bir martalik rasm bilan ishlashi tasdiqlanmagan. Sinov mantiqi soxta Telegram API bilan tekshirilgan. Birinchi oddiy rasm ham sinov kvotasini ishlatadi. Ikkala akkaunt ham **Sinovni to‘xtatish** orqali o‘z roziligini bekor qilishi mumkin. Server qayta deploy bo‘lsa lokal bazadagi sinov bekor bo‘lishi mumkin.
