@@ -229,7 +229,27 @@ class PostgresMessageHistory:
                     cursor = connection.execute(sql, values)
                     result = cursor.fetchall() if cursor.description else []
                 return result
-        except self.driver.Error:
+        except self.driver.Error as exc:
+            detail = str(exc).lower()
+            reason = "database_error"
+            for marker, category in (
+                ("invalid connection option", "invalid_connection_string"),
+                ("missing", "invalid_connection_string"),
+                ("password authentication failed", "authentication_failed"),
+                ("could not translate host", "hostname_resolution_failed"),
+                ("name or service not known", "hostname_resolution_failed"),
+                ("timeout", "connection_timeout"),
+                ("unsupported startup parameter", "unsupported_startup_parameter"),
+                ("permission denied", "database_permission_denied"),
+                ("syntax error", "sql_syntax_error"),
+                ("ssl", "tls_connection_error"),
+            ):
+                if marker in detail:
+                    reason = category
+                    break
+            state = getattr(exc, "sqlstate", None)
+            state = state if isinstance(state, str) and re.fullmatch(r"[A-Z0-9]{5}", state) else "none"
+            log.error("History database failure: category=%s sqlstate=%s", reason, state)
             # Never leak credentials, SQL parameters or message bodies to logs.
             raise TelegramTemporaryError("Tarix bazasi vaqtincha mavjud emas") from None
 
