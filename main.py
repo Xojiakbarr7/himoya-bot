@@ -69,6 +69,8 @@ MAIN_KEYBOARD = {
     ],
     "resize_keyboard": True,
     "is_persistent": True,
+    "one_time_keyboard": False,
+    "selective": False,
     "input_field_placeholder": "Tugmalardan birini tanlang",
 }
 ALLOWED_UPDATES = [
@@ -355,6 +357,12 @@ def api_error_text(data: dict[str, Any]) -> str:
 async def api(session: aiohttp.ClientSession, method: str, payload: dict[str, Any] | None = None) -> Any:
     if not re.fullmatch(r"[A-Za-z]+", method):
         raise TelegramAPIError("Telegram API metodi noto‘g‘ri")
+    if (
+        method == "sendMessage" and payload
+        and type(payload.get("chat_id")) is int and payload["chat_id"] > 0
+        and not payload.get("business_connection_id") and "reply_markup" not in payload
+    ):
+        payload = {**payload, "reply_markup": MAIN_KEYBOARD}
     try:
         async with session.post(f"{API_BASE}/{method}", json=payload or {}, allow_redirects=False) as response:
             if response.status == 429 or response.status >= 500:
@@ -621,6 +629,7 @@ async def send_delete_mode_menu(
     session: aiohttp.ClientSession, store: Store, chat_id: int,
 ) -> None:
     text, keyboard = delete_mode_content(store, chat_id)
+    await send_text(session, chat_id, "🗑 <b>Avto o‘chirish sozlamasi</b>")
     allowed, permission_text = await check_delete_permission(session, store, chat_id)
     text += "\n\n" + permission_text
     await api(session, "sendMessage", {
@@ -678,6 +687,7 @@ async def send_outgoing_warning_menu(
     session: aiohttp.ClientSession, store: Store, chat_id: int,
 ) -> None:
     text, keyboard = outgoing_warning_content(store, chat_id)
+    await send_text(session, chat_id, "⚠️ <b>Yuborilgan xabar ogohlantirishi</b>")
     await api(session, "sendMessage", {
         "chat_id": chat_id,
         "text": text,
@@ -707,6 +717,7 @@ async def send_unknown_sender_menu(
     session: aiohttp.ClientSession, store: Store, chat_id: int,
 ) -> None:
     text, keyboard = unknown_sender_content(store, chat_id)
+    await send_text(session, chat_id, "🌍 <b>Xalqaro raqam ogohlantirishi</b>")
     await api(session, "sendMessage", {
         "chat_id": chat_id,
         "text": text,
@@ -761,6 +772,8 @@ async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]
             "Bot ruxsat berilgan shaxsiy chatlardagi havola, APK va firibgarlikka o‘xshash iboralarni belgilaydi. "
             "Yuborilgan xabar ogohlantirishi va avto o‘chirish rejimlarini tugmalardan yoqib/o‘chirish mumkin. "
             "U faylni yuklab olmaydi va zararli ekanini tasdiqlamaydi.")
+    else:
+        await send_text(session, chat_id, "🛡 Kerakli bo‘limni pastdagi menyudan tanlang.")
 
 
 async def handle_keyboard_button(
@@ -804,11 +817,15 @@ def is_manual_scan_input(message: dict[str, Any]) -> bool:
 
 
 async def handle_manual_scan(session: aiohttp.ClientSession, message: dict[str, Any]) -> None:
-    if (message.get("chat") or {}).get("type") != "private" or not is_manual_scan_input(message):
+    if (message.get("chat") or {}).get("type") != "private":
+        return
+    if not is_manual_scan_input(message):
+        await send_text(session, int(message["chat"]["id"]), "🛡 Kerakli bo‘limni pastdagi menyudan tanlang.")
         return
     result = analyze(message)
     chat_id = int(message["chat"]["id"])
     if result:
+        await send_text(session, chat_id, "🔎 <b>Xabarni tekshirish natijasi</b>")
         await api(session, "sendMessage", {
             "chat_id": chat_id,
             "text": "🔎 <b>Qo‘lda tekshiruv natijasi</b>\n\n" + alert_message(result),
@@ -1075,6 +1092,10 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
                 if isinstance(exc, TelegramTemporaryError):
                     raise
                 log.warning("Himoya sozlamasi xabarini yangilay olmadim: %s", exc)
+            await send_text(
+                session, callback_chat_id,
+                "✅ Sozlama yoqildi." if enabled else "⏸ Sozlama o‘chirildi.",
+            )
             return
         await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
         if data.startswith("why:"):

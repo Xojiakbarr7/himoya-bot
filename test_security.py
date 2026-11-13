@@ -162,6 +162,21 @@ class WebhookSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post(update)).status, 200)
         self.assertTrue(self.store.outgoing_warning_enabled(10))
         self.assertFalse(self.store.outgoing_warning_enabled(20))
+        self.assertTrue(any(call.args[2].get("reply_markup") == main.MAIN_KEYBOARD for call in self.api.await_args_list))
+
+    async def test_plain_message_unknown_command_and_menu_button_restore_keyboard(self):
+        for update_id, text in enumerate(("Salom", "/unknown", main.BUTTON_SCAN), 1):
+            self.api.reset_mock()
+            self.assertEqual((await self.post(private_update(update_id, text=text))).status, 200)
+            markup = self.api.await_args_list[-1].args[2]["reply_markup"]
+            self.assertTrue(markup["is_persistent"])
+            self.assertFalse(markup["one_time_keyboard"])
+
+    async def test_inline_settings_also_refresh_main_keyboard(self):
+        self.assertEqual((await self.post(private_update(text=main.BUTTON_OUTGOING_WARNING))).status, 200)
+        markups = [call.args[2].get("reply_markup", {}) for call in self.api.await_args_list]
+        self.assertIn(main.MAIN_KEYBOARD, markups)
+        self.assertTrue(any("inline_keyboard" in markup for markup in markups))
 
     async def test_private_spam_limited_without_limiting_business_deletion(self):
         main.PRIVATE_LIMITER = main.InteractionLimiter(capacity=2)
@@ -248,6 +263,30 @@ class LocalSecurityTests(unittest.TestCase):
 
 
 class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_menu_default_only_for_private_bot_messages_without_inline_markup(self):
+        sent = []
+        async def receive(request):
+            sent.append(await request.json())
+            return web.json_response({"ok": True, "result": {}})
+        app = web.Application()
+        app.router.add_post("/sendMessage", receive)
+        server = TestServer(app)
+        await server.start_server(access_log=None)
+        try:
+            async with aiohttp.ClientSession() as session:
+                with patch.object(main, "API_BASE", str(server.make_url("/")).rstrip("/")):
+                    await main.api(session, "sendMessage", {"chat_id": 10, "text": "Hello"})
+                    await main.api(session, "sendMessage", {"chat_id": -10, "text": "Group"})
+                    await main.api(session, "sendMessage", {"chat_id": 10, "text": "Business", "business_connection_id": "c"})
+                    inline = {"inline_keyboard": [[{"text": "Tips", "callback_data": "tips"}]]}
+                    await main.api(session, "sendMessage", {"chat_id": 10, "text": "Inline", "reply_markup": inline})
+            self.assertEqual(sent[0]["reply_markup"], main.MAIN_KEYBOARD)
+            self.assertNotIn("reply_markup", sent[1])
+            self.assertNotIn("reply_markup", sent[2])
+            self.assertEqual(sent[3]["reply_markup"], inline)
+        finally:
+            await server.close()
+
     async def test_api_redirect_not_followed_and_chunked_json_supported(self):
         leaked = []
         async def redirect(request):
