@@ -218,6 +218,15 @@ def inspect_apk(data: bytes) -> dict:
         raise ValueError("APK too large")
     result = {"sha256": hashlib.sha256(data).hexdigest(), "permissions": [], "valid_apk": False, "manifest_read": False}
     try:
+        # Bound central-directory allocation before ZipFile constructs entry objects.
+        eocd = data.rfind(b"PK\x05\x06", max(0, len(data) - 65557))
+        if eocd < 0 or eocd + 22 > len(data):
+            return result
+        disk, directory_disk, disk_count, count, directory_size, directory_offset, comment_size = struct.unpack_from("<HHHHIIH", data, eocd + 4)
+        if (disk or directory_disk or disk_count != count or count > 10000
+                or directory_size > 4 * 1024 * 1024 or directory_offset + directory_size > eocd
+                or eocd + 22 + comment_size != len(data)):
+            return result
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             if len(archive.infolist()) > 10000:
                 raise ValueError("Too many APK entries")

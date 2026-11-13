@@ -87,6 +87,14 @@ class PassiveScannerTests(unittest.TestCase):
         self.assertFalse(inspect_apk(b"not an apk")["valid_apk"])
         self.assertFalse(inspect_apk(apk(b'<!DOCTYPE manifest [<!ENTITY x "test">]><manifest/>'))["manifest_read"])
 
+    def test_large_zip_directory_rejected_before_allocating_entries(self):
+        data = bytearray(apk(b"<manifest/>"))
+        eocd = data.rfind(b"PK\x05\x06")
+        struct.pack_into("<HH", data, eocd + 8, 65535, 65535)
+        with patch("threat_intel.zipfile.ZipFile") as archive:
+            self.assertFalse(inspect_apk(bytes(data))["valid_apk"])
+            archive.assert_not_called()
+
 
 class Response:
     def __init__(self, status=200, body=None):
