@@ -223,85 +223,32 @@ class WebhookSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post(update)).status, 200)
         self.assertIn("deleteMessage", [call.args[1] for call in self.api.await_args_list])
 
-    async def test_photo_test_requires_both_sides_consent_and_copies_only_once(self):
-        import re
+    async def test_removed_photo_and_foreign_number_modes_do_nothing(self):
         self.store.save_connection({"id": "c", "user": {"id": 10}, "user_chat_id": 10, "is_enabled": True})
-        self.api.return_value = {"username": "Qalqonn_bot"}
-        def callback(update_id, actor, data):
-            return {"update_id": update_id, "callback_query": {
-                "id": str(update_id), "from": {"id": actor}, "data": data,
-                "message": {"message_id": 5, "chat": {"id": actor, "type": "private"}},
-            }}
-        self.assertEqual((await self.post(callback(1, 10, "photo_test:new"))).status, 200)
-        text = self.api.await_args_list[-1].args[2]["text"]
-        token = re.search(r"photo_test_([A-Za-z0-9_-]{32})", text).group(1)
-        photo = business_update(2, "")
-        photo["business_message"]["photo"] = [{"file_id": "TEST_FILE_ID_1234567890"}]
-        self.api.reset_mock()
-        await self.post(photo)
-        self.assertFalse(any(c.args[1] == "sendPhoto" for c in self.api.await_args_list))
-        await self.post(private_update(3, actor=20, chat=20, text="/start photo_test_" + token))
-        self.assertEqual(self.store.photo_invite(token)[2], 0)
-        await self.post(callback(4, 20, "photo_test:yes:" + token))
-        self.assertEqual(self.store.photo_invite(token)[1], 20)
-        self.api.reset_mock()
-        photo["update_id"] = 5
-        await self.post(photo)
-        photo["update_id"] = 6
-        await self.post(photo)
-        copies = [c for c in self.api.await_args_list if c.args[1] == "sendPhoto"]
-        self.assertEqual(len(copies), 1)
-        self.assertEqual(copies[0].args[2]["chat_id"], 10)
-        self.assertNotIn("getFile", [c.args[1] for c in self.api.await_args_list])
-        self.assertNotIn("TEST_FILE_ID_1234567890", str(self.store.db.execute("SELECT * FROM photo_tests").fetchall()))
-
-    async def test_photo_test_does_not_copy_without_consent(self):
-        self.store.save_connection({"id": "c", "user": {"id": 10}, "user_chat_id": 10, "is_enabled": True})
-        photo = business_update(1, "")
-        photo["business_message"]["photo"] = [{"file_id": "TEST_FILE_ID_1234567890"}]
-        await self.post(photo)
+        update = business_update(1, "+44 7700 900123")
+        update["business_message"]["photo"] = [{"file_id": "TEST_FILE_ID_1234567890"}]
+        self.assertEqual((await self.post(update)).status, 200)
         self.api.assert_not_awaited()
+        labels = str(main.MAIN_KEYBOARD)
+        self.assertNotIn("Xalqaro raqam", labels)
+        self.assertNotIn("rasmlarimni", labels)
 
-    async def test_photo_test_sender_scope_expiry_and_revocation(self):
-        import time
-        self.store.save_connection({"id": "c", "user": {"id": 10}, "user_chat_id": 10, "is_enabled": True})
-        token = self.store.new_photo_test(10)
-        self.assertIsNone(self.store.approve_photo_test(token, 10))
-        self.assertEqual(self.store.approve_photo_test(token, 20), 10)
-        self.assertIsNone(self.store.claim_photo_test(10, 30))
-        self.assertIsNone(self.store.claim_photo_test(30, 20))
-        self.store.stop_photo_tests(20)
-        self.assertIsNone(self.store.claim_photo_test(10, 20))
-        token = self.store.new_photo_test(10)
-        self.store.approve_photo_test(token, 20)
-        self.store.db.execute("UPDATE photo_tests SET expires=?", (int(time.time()) - 1,))
-        self.store.db.commit()
-        self.assertIsNone(self.store.claim_photo_test(10, 20))
+    async def test_old_buttons_cannot_reactivate_removed_modes(self):
+        for update_id, data in enumerate(("photo_test:new", "unknown_sender:on"), 1):
+            update = {"update_id": update_id, "callback_query": {
+                "id": str(update_id), "from": {"id": 10}, "data": data,
+                "message": {"message_id": 5, "chat": {"id": 10, "type": "private"}},
+            }}
+            self.assertEqual((await self.post(update)).status, 200)
+        self.assertFalse(any(call.args[1] == "sendPhoto" for call in self.api.await_args_list))
+        tables = {row[0] for row in self.store.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertNotIn("photo_tests", tables)
+        self.assertNotIn("sender_profiles", tables)
 
-    async def test_photo_test_rejects_url_file_id_and_handles_telegram_rejection(self):
-        self.store.save_connection({"id": "c", "user": {"id": 10}, "user_chat_id": 10, "is_enabled": True})
-        token = self.store.new_photo_test(10)
-        self.store.approve_photo_test(token, 20)
-        photo = business_update(1, "")
-        photo["business_message"]["photo"] = [{"file_id": "https://example.com/private"}]
-        await self.post(photo)
-        self.assertFalse(any(c.args[1] == "sendPhoto" for c in self.api.await_args_list))
-        token = self.store.new_photo_test(10)
-        self.store.approve_photo_test(token, 20)
-        async def reject_photo(session, method, payload=None):
-            if method == "sendPhoto":
-                raise main.TelegramAPIError("not allowed")
-            return {}
-        self.api.side_effect = reject_photo
-        photo["update_id"] = 2
-        photo["business_message"]["photo"] = [{"file_id": "TEST_FILE_ID_1234567890"}]
-        self.assertEqual((await self.post(photo)).status, 200)
-        self.assertIsNone(self.store.photo_invite(token))
 
-    async def test_declining_photo_test_cancels_invitation(self):
-        token = self.store.new_photo_test(10)
-        self.store.decline_photo_test(token)
-        self.assertIsNone(self.store.approve_photo_test(token, 20))
+
+
+
 
     async def test_transient_delete_failure_not_marked_processed(self):
         self.store.save_connection({"id": "c", "user": {"id": 10}, "user_chat_id": 10, "is_enabled": True})

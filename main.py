@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict, deque
 import html
-import hashlib
 import ipaddress
 import json
 import logging
@@ -59,16 +58,12 @@ BUTTON_SCAN = "🔎 Xabarni tekshirish"
 BUTTON_HELP = "ℹ️ Qanday ishlaydi"
 BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
 BUTTON_OUTGOING_WARNING = "⚠️ Yuborilgan xabar ogohlantirishi"
-BUTTON_UNKNOWN_SENDER = "🌍 Xalqaro raqam ogohlantirishi"
-BUTTON_PHOTO_TEST = "🧪 O‘z rasmlarimni sinash"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
         [BUTTON_SCAN, BUTTON_HELP],
         [BUTTON_DELETE_MODE],
         [BUTTON_OUTGOING_WARNING],
-        [BUTTON_UNKNOWN_SENDER],
-        [BUTTON_PHOTO_TEST],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -169,16 +164,13 @@ class Store:
         path.chmod(0o600)
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.execute("PRAGMA trusted_schema=OFF")
+        self.db.execute("DROP TABLE IF EXISTS photo_tests")
+        self.db.execute("DROP TABLE IF EXISTS sender_profiles")
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS processed_updates ("
             "update_id INTEGER PRIMARY KEY, processed_at INTEGER NOT NULL)"
         )
         self.db.execute("CREATE INDEX IF NOT EXISTS processed_updates_age ON processed_updates(processed_at)")
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS photo_tests ("
-            "token_hash TEXT PRIMARY KEY, owner INTEGER NOT NULL, sender INTEGER, "
-            "expires INTEGER NOT NULL, approved INTEGER NOT NULL DEFAULT 0, remaining INTEGER NOT NULL DEFAULT 1)"
-        )
         self.db.execute("DELETE FROM processed_updates WHERE processed_at < ?", (int(time.time()) - 172800,))
         self._processed_since_cleanup = 0
         self.db.execute(
@@ -192,23 +184,13 @@ class Store:
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS user_settings ("
             "owner_user_id INTEGER PRIMARY KEY, auto_delete_harmful INTEGER NOT NULL DEFAULT 0, "
-            "outgoing_warning INTEGER NOT NULL DEFAULT 0, unknown_sender_warning INTEGER NOT NULL DEFAULT 1)"
+            "outgoing_warning INTEGER NOT NULL DEFAULT 0)"
         )
         setting_columns = {row[1] for row in self.db.execute("PRAGMA table_info(user_settings)")}
         if "outgoing_warning" not in setting_columns:
             self.db.execute(
                 "ALTER TABLE user_settings ADD COLUMN outgoing_warning INTEGER NOT NULL DEFAULT 0"
             )
-        if "unknown_sender_warning" not in setting_columns:
-            self.db.execute(
-                "ALTER TABLE user_settings ADD COLUMN unknown_sender_warning INTEGER NOT NULL DEFAULT 1"
-            )
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS sender_profiles ("
-            "owner_user_id INTEGER NOT NULL, sender_user_id INTEGER NOT NULL, "
-            "trusted INTEGER NOT NULL DEFAULT 0, foreign_number_alerted INTEGER NOT NULL DEFAULT 0, "
-            "PRIMARY KEY(owner_user_id, sender_user_id))"
-        )
         self.db.commit()
 
     def save_connection(self, connection: dict[str, Any]) -> None:
@@ -278,56 +260,6 @@ class Store:
         )
         self.db.commit()
 
-    def unknown_sender_warning_enabled(self, owner_user_id: int) -> bool:
-        row = self.db.execute(
-            "SELECT unknown_sender_warning FROM user_settings WHERE owner_user_id=?",
-            (int(owner_user_id),),
-        ).fetchone()
-        return bool(row[0]) if row else True
-
-    def set_unknown_sender_warning(self, owner_user_id: int, enabled: bool) -> None:
-        self.db.execute(
-            "INSERT INTO user_settings(owner_user_id, unknown_sender_warning) VALUES(?,?) "
-            "ON CONFLICT(owner_user_id) DO UPDATE SET unknown_sender_warning=excluded.unknown_sender_warning",
-            (int(owner_user_id), int(enabled)),
-        )
-        self.db.commit()
-
-    def observe_sender(self, owner_user_id: int, sender_user_id: int) -> tuple[bool, bool]:
-        cursor = self.db.execute(
-            "INSERT OR IGNORE INTO sender_profiles(owner_user_id, sender_user_id) VALUES(?,?)",
-            (int(owner_user_id), int(sender_user_id)),
-        )
-        self.db.commit()
-        row = self.db.execute(
-            "SELECT trusted FROM sender_profiles WHERE owner_user_id=? AND sender_user_id=?",
-            (int(owner_user_id), int(sender_user_id)),
-        ).fetchone()
-        return cursor.rowcount == 1, bool(row[0]) if row else False
-
-    def trust_sender(self, owner_user_id: int, sender_user_id: int) -> None:
-        self.db.execute(
-            "INSERT INTO sender_profiles(owner_user_id, sender_user_id, trusted) VALUES(?,?,1) "
-            "ON CONFLICT(owner_user_id, sender_user_id) DO UPDATE SET trusted=1",
-            (int(owner_user_id), int(sender_user_id)),
-        )
-        self.db.commit()
-
-    def mark_foreign_number_alerted(self, owner_user_id: int, sender_user_id: int) -> bool:
-        cursor = self.db.execute(
-            "UPDATE sender_profiles SET foreign_number_alerted=1 "
-            "WHERE owner_user_id=? AND sender_user_id=? AND foreign_number_alerted=0",
-            (int(owner_user_id), int(sender_user_id)),
-        )
-        self.db.commit()
-        return cursor.rowcount == 1
-
-    def foreign_number_alerted(self, owner_user_id: int, sender_user_id: int) -> bool:
-        row = self.db.execute(
-            "SELECT foreign_number_alerted FROM sender_profiles WHERE owner_user_id=? AND sender_user_id=?",
-            (int(owner_user_id), int(sender_user_id)),
-        ).fetchone()
-        return bool(row[0]) if row else False
 
     def set_offset(self, offset: int) -> None:
         self.db.execute(
@@ -336,63 +268,6 @@ class Store:
         )
         self.db.commit()
 
-    def new_photo_test(self, owner: int) -> str:
-        token = secrets.token_urlsafe(24)
-        self.db.execute("DELETE FROM photo_tests WHERE owner=? OR expires<=?", (owner, int(time.time())))
-        self.db.execute(
-            "INSERT INTO photo_tests(token_hash,owner,expires) VALUES(?,?,?)",
-            (hashlib.sha256(token.encode()).hexdigest(), owner, int(time.time()) + 900),
-        )
-        self.db.commit()
-        return token
-
-    def photo_invite(self, token: str) -> tuple[int, int | None, int] | None:
-        if not re.fullmatch(r"[A-Za-z0-9_-]{32}", token):
-            return None
-        row = self.db.execute(
-            "SELECT owner,sender,approved FROM photo_tests WHERE token_hash=? AND expires>? AND remaining=1",
-            (hashlib.sha256(token.encode()).hexdigest(), int(time.time())),
-        ).fetchone()
-        return (int(row[0]), int(row[1]) if row[1] else None, int(row[2])) if row else None
-
-    def approve_photo_test(self, token: str, sender: int) -> int | None:
-        invite = self.photo_invite(token)
-        if not invite or invite[0] == sender or invite[2]:
-            return None
-        cursor = self.db.execute(
-            "UPDATE photo_tests SET sender=?,approved=1 WHERE token_hash=? AND approved=0 AND remaining=1 AND expires>?",
-            (sender, hashlib.sha256(token.encode()).hexdigest(), int(time.time())),
-        )
-        self.db.commit()
-        return invite[0] if cursor.rowcount == 1 else None
-
-    def claim_photo_test(self, owner: int, sender: int) -> str | None:
-        row = self.db.execute(
-            "SELECT token_hash FROM photo_tests WHERE owner=? AND sender=? AND approved=1 AND remaining=1 AND expires>?",
-            (owner, sender, int(time.time())),
-        ).fetchone()
-        if not row:
-            return None
-        cursor = self.db.execute("UPDATE photo_tests SET remaining=0 WHERE token_hash=? AND remaining=1", (row[0],))
-        self.db.commit()
-        return str(row[0]) if cursor.rowcount == 1 else None
-
-    def retry_photo_test(self, token_hash: str) -> None:
-        self.db.execute("UPDATE photo_tests SET remaining=1 WHERE token_hash=? AND expires>?", (token_hash, int(time.time())))
-        self.db.commit()
-
-    def stop_photo_tests(self, user_id: int) -> None:
-        self.db.execute("UPDATE photo_tests SET remaining=0 WHERE owner=? OR sender=?", (user_id, user_id))
-        self.db.commit()
-
-    def decline_photo_test(self, token: str) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9_-]{32}", token):
-            return
-        self.db.execute(
-            "UPDATE photo_tests SET remaining=0 WHERE token_hash=? AND approved=0",
-            (hashlib.sha256(token.encode()).hexdigest(),),
-        )
-        self.db.commit()
 
     def update_processed(self, update_id: int) -> bool:
         return self.db.execute(
@@ -467,41 +342,6 @@ def urls_from_message(message: dict[str, Any]) -> list[str]:
                 if visible_url:
                     found.add(visible_url.rstrip(TRAILING_URL_PUNCTUATION))
     return sorted(url for url in found if url)
-
-
-def has_foreign_international_number(message: dict[str, Any]) -> bool:
-    """Detect an explicit international number other than +998 or +7."""
-    text = " ".join(str(message.get(key) or "") for key in ("text", "caption"))
-    contact = message.get("contact") or {}
-    if contact.get("phone_number"):
-        text += " " + str(contact["phone_number"])
-    for match in re.finditer(r"(?<!\w)\+\s*\d[\d\s().-]{5,24}", text):
-        digits = re.sub(r"\D", "", match.group())
-        if not 7 <= len(digits) <= 15:
-            continue
-        if digits.startswith(("998", "7")):
-            continue
-        return True
-    return False
-
-
-def sender_display(message: dict[str, Any]) -> str:
-    sender = message.get("from") or {}
-    username = str(sender.get("username") or "").strip()
-    if username:
-        return "@" + html.escape(username)
-    name = " ".join(part for part in (sender.get("first_name"), sender.get("last_name")) if part)
-    return html.escape(name or "Telegram foydalanuvchisi")
-
-
-def foreign_number_alert(message: dict[str, Any]) -> str:
-    return (
-        "🌍 <b>Xalqaro raqam ogohlantirishi</b>\n\n"
-        f"Yuboruvchi: {sender_display(message)}\n"
-        "Xabarda +998 va +7 dan boshqa xalqaro telefon raqami ko‘rindi. "
-        "Bu yuboruvchining o‘z raqami ekanini anglatmaydi.\n\n"
-        "Shaxsni boshqa yo‘l bilan tekshirib oling."
-    )
 
 
 def host_from_url(url: str) -> str:
@@ -648,14 +488,12 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "• Ruxsat berilgan shaxsiy chatlardagi xavf belgilarini aniqlab, sizga ogohlantirish yuboradi.\n"
             "• <b>🗑 Avto o‘chirish sozlamasi</b> orqali APK/dastur fayllari va barcha havolali xabarlarni o‘chirishni o‘zingiz yoqasiz yoki o‘chirasiz.\n"
             "• <b>⚠️ Yuborilgan xabar ogohlantirishi</b> orqali akkauntingizdan APK yoki shubhali havola ketsa, oluvchiga ogohlantirish yozishni yoqasiz yoki o‘chirasiz.\n"
-            "• <b>🌍 Xalqaro raqam ogohlantirishi</b> xabardagi +998/+7 dan boshqa xalqaro raqamni bildiradi.\n"
             "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
             "<b>Qanday yoqiladi?</b>\n"
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
             "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>barcha xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
             "3. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
             "⚠️ Bot APK faylni antivirus kabi tekshirmaydi; xavf belgilariga qarab ogohlantiradi. Xabar matnlari bazada saqlanmaydi, fayllar yuklab olinmaydi."
-            " Telegram odatda yuboruvchining telefon raqamini botga ko‘rsatmaydi; faqat xabarda ochiq yozilgan yoki kontakt qilib yuborilgan raqam tekshiriladi."
         ),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
@@ -671,119 +509,6 @@ async def send_text(session: aiohttp.ClientSession, chat_id: int, text: str) -> 
         "disable_web_page_preview": True,
         "reply_markup": MAIN_KEYBOARD,
     })
-
-
-async def send_photo_test_menu(session: aiohttp.ClientSession, chat_id: int) -> None:
-    await send_text(session, chat_id,
-        "🧪 <b>Ikki akkaunt bilan rasm sinovi</b>\n\n"
-        "Bu rejim odatda o‘chiq. Sinov havolasini o‘zingizning ikkinchi akkauntingizda ochib, "
-        "rasm nusxasini birinchi akkauntga yuborishga alohida rozilik bering.\n\n"
-        "Sinov 15 daqiqa va faqat bitta rasm uchun amal qiladi. Rasm botga Telegram API orqali "
-        "kelgan bo‘lsa, nusxasi yuboriladi. Bir martalik rasmni Telegram botga bermasligi mumkin; "
-        "bu rejim Telegram cheklovlarini chetlab o‘tmaydi. Fayl serverga yuklab olinmaydi.")
-    await api(session, "sendMessage", {
-        "chat_id": chat_id, "text": "Sinovni boshqarish:",
-        "reply_markup": {"inline_keyboard": [[
-            {"text": "🔗 Sinov havolasini olish", "callback_data": "photo_test:new"},
-        ], [{"text": "⏹ Sinovni to‘xtatish", "callback_data": "photo_test:stop"}]]},
-    })
-
-
-async def open_photo_test_invite(
-    session: aiohttp.ClientSession, store: Store, message: dict[str, Any],
-) -> bool:
-    parts = str(message.get("text") or "").split()
-    if len(parts) != 2 or parts[0].split("@", 1)[0] != "/start" or not parts[1].startswith("photo_test_"):
-        return False
-    actor = int(message["chat"]["id"])
-    token = parts[1][len("photo_test_"):]
-    invite = store.photo_invite(token)
-    if not invite or invite[2] or invite[0] == actor:
-        await send_text(session, actor, "Sinov havolasi eskirgan, ishlatilgan yoki boshqa akkauntda ochilishi kerak.")
-        return True
-    await send_text(session, actor,
-        "🧪 <b>Rasm nusxasini yuborishga rozilik</b>\n\n"
-        f"Qabul qiluvchi akkaunt ID: <code>{invite[0]}</code>\n\n"
-        "Tasdiqlasangiz, shu akkauntga keyin yuboradigan <b>bitta rasmingiz</b> bot orqali "
-        "uning shaxsiy bot chatiga nusxalanishi mumkin. Sinov 15 daqiqada tugaydi. "
-        "Faqat ikkala akkaunt ham sizniki bo‘lsa va shu nusxani olishga rozi bo‘lsangiz tasdiqlang.")
-    await api(session, "sendMessage", {
-        "chat_id": actor, "text": "Rasmingiz nusxalanishiga rozimisiz?",
-        "reply_markup": {"inline_keyboard": [[
-            {"text": "✅ Roziman", "callback_data": f"photo_test:yes:{token}"},
-            {"text": "❌ Yo‘q", "callback_data": f"photo_test:no:{token}"},
-        ]]},
-    })
-    return True
-
-
-async def handle_photo_test_callback(
-    session: aiohttp.ClientSession, store: Store, query: dict[str, Any],
-) -> None:
-    actor = int(query["from"]["id"])
-    data = str(query.get("data") or "")
-    # Acknowledge a real Telegram callback before changing consent state.
-    await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
-    if data == "photo_test:stop":
-        store.stop_photo_tests(actor)
-        await send_text(session, actor, "⏹ Siz qatnashgan rasm sinovlari to‘xtatildi.")
-    elif data.startswith("photo_test:no:"):
-        store.decline_photo_test(data[len("photo_test:no:"):])
-        await send_text(session, actor, "⏹ Rozilik berilmadi. Sinov bekor qilindi.")
-    elif data == "photo_test:new":
-        if not store.active_connection_id(actor):
-            await send_text(session, actor, "Avval shu akkauntga botni Telegram Business orqali ulang.")
-            return
-        me = await api(session, "getMe")
-        username = str(me.get("username") or "")
-        if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
-            await send_text(session, actor, "Bot havolasini yaratib bo‘lmadi. Keyinroq urinib ko‘ring.")
-            return
-        token = store.new_photo_test(actor)
-        await send_text(session, actor,
-            "🔗 Havolani <b>o‘zingizning ikkinchi akkauntingizda</b> ochib, rozilikni tasdiqlang:\n\n"
-            f"https://t.me/{username}?start=photo_test_{token}\n\n"
-            "Keyin ikkinchi akkauntdan shu Business akkauntingizga bitta rasm yuboring. "
-            "Bu chat botga ruxsat berilgan chatlar ichida bo‘lishi kerak. Havola 15 daqiqada eskiradi.")
-    elif data.startswith("photo_test:yes:"):
-        token = data[len("photo_test:yes:"):]
-        owner = store.approve_photo_test(token, actor)
-        if owner is None:
-            await send_text(session, actor, "Havola eskirgan yoki ishlatilgan. Yangi sinov havolasi kerak.")
-            return
-        await send_text(session, actor, "✅ Rozilik qayd etildi. Endi o‘zingizning birinchi akkauntingizga bitta sinov rasmi yuboring.")
-        await send_text(session, owner,
-            f"✅ <code>{actor}</code> akkaunti bitta rasm nusxasi uchun rozilik berdi. "
-            "Sinov havola yaratilganidan 15 daqiqa o‘tgach avtomatik tugaydi.")
-
-
-async def try_consented_photo_test(
-    session: aiohttp.ClientSession, store: Store, message: dict[str, Any],
-    owner_chat_id: int, owner_user_id: int,
-) -> None:
-    photos = message.get("photo")
-    sender = (message.get("from") or {}).get("id")
-    if not isinstance(photos, list) or not photos or not sender or sender == owner_user_id:
-        return
-    token_hash = store.claim_photo_test(owner_user_id, int(sender))
-    if not token_hash:
-        return
-    file_id = photos[-1].get("file_id")
-    if not isinstance(file_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{10,1024}", file_id):
-        await send_text(session, owner_chat_id, "🧪 Rasm xabari keldi, lekin Telegram qayta yuborish uchun fayl ID bermadi. Sinov tugadi.")
-        return
-    try:
-        await api(session, "sendPhoto", {
-            "chat_id": owner_chat_id, "photo": file_id,
-            "caption": "🧪 Ikki akkaunt roziligi bilan sinov nusxasi. Sinov tugadi.",
-            "reply_markup": MAIN_KEYBOARD,
-        })
-    except TelegramTemporaryError:
-        store.retry_photo_test(token_hash)
-        raise
-    except TelegramAPIError:
-        await send_text(session, owner_chat_id,
-            "🧪 Telegram bu rasmni qayta yuborishga ruxsat bermadi. Rasm serverga yuklab olinmadi. Sinov tugadi.")
 
 
 def delete_mode_content(store: Store, owner_user_id: int) -> tuple[str, dict[str, Any]]:
@@ -876,36 +601,6 @@ async def send_outgoing_warning_menu(
     })
 
 
-def unknown_sender_content(store: Store, owner_user_id: int) -> tuple[str, dict[str, Any]]:
-    enabled = store.unknown_sender_warning_enabled(owner_user_id)
-    status = "🟢 YOQILGAN" if enabled else "⚪ O‘CHIRILGAN"
-    text = (
-        f"🌍 <b>Xalqaro raqam ogohlantirishi: {status}</b>\n\n"
-        "Xabarda ochiq ko‘rsatilgan yoki kontakt sifatida yuborilgan +raqam aniqlansa, +998 va +7 dan "
-        "boshqa xalqaro raqamlar haqida ham bir marta xabar beradi. Bu raqam yuboruvchining o‘ziga tegishli "
-        "bo‘lishi shart emas. Telegram botga yuboruvchining odatda yashirin telefon raqamini bermaydi."
-    )
-    keyboard = {"inline_keyboard": [[
-        {"text": "✅ Yoqish", "callback_data": "unknown_sender:on"},
-        {"text": "⏸ O‘chirish", "callback_data": "unknown_sender:off"},
-    ]]}
-    return text, keyboard
-
-
-async def send_unknown_sender_menu(
-    session: aiohttp.ClientSession, store: Store, chat_id: int,
-) -> None:
-    text, keyboard = unknown_sender_content(store, chat_id)
-    await send_text(session, chat_id, "🌍 <b>Xalqaro raqam ogohlantirishi</b>")
-    await api(session, "sendMessage", {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "reply_markup": keyboard,
-        "disable_web_page_preview": True,
-    })
-
-
 async def handle_status(session: aiohttp.ClientSession, chat_id: int) -> None:
     try:
         info = await api(session, "getWebhookInfo")
@@ -981,10 +676,6 @@ async def handle_keyboard_button(
         await send_delete_mode_menu(session, store, chat_id)
     elif text == BUTTON_OUTGOING_WARNING:
         await send_outgoing_warning_menu(session, store, chat_id)
-    elif text in {BUTTON_UNKNOWN_SENDER, "👤 Yangi akkaunt ogohlantirishi"}:
-        await send_unknown_sender_menu(session, store, chat_id)
-    elif text == BUTTON_PHOTO_TEST:
-        await send_photo_test_menu(session, chat_id)
     else:
         return False
     return True
@@ -1190,8 +881,7 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
             return
         text = str(message.get("text") or "")
         if text.startswith("/"):
-            if not await open_photo_test_invite(session, store, message):
-                await handle_command(session, message)
+            await handle_command(session, message)
         else:
             handled = await handle_keyboard_button(session, store, message)
             if not handled:
@@ -1210,22 +900,17 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if "callback_query" in update:
         query = update["callback_query"]
         data = query.get("data", "")
-        if data.startswith("photo_test:"):
-            await handle_photo_test_callback(session, store, query)
-            return
-        if data.startswith("trust_sender:"):
+        if data.startswith(("photo_test:", "unknown_sender:", "trust_sender:")):
             await api(session, "answerCallbackQuery", {
-                "callback_query_id": query["id"],
-                "text": "Yangi yuboruvchi ogohlantirishi olib tashlangan.",
+                "callback_query_id": query["id"], "text": "Bu bo‘lim olib tashlangan.",
             })
+            await send_text(session, int(query["from"]["id"]), "🛡 Menyu yangilandi. Kerakli bo‘limni pastdan tanlang.")
             return
         toggle_setting = None
         if data in {"delete_mode:on", "delete_mode:off"}:
             toggle_setting = "delete_mode"
         elif data in {"outgoing_warning:on", "outgoing_warning:off"}:
             toggle_setting = "outgoing_warning"
-        elif data in {"unknown_sender:on", "unknown_sender:off"}:
-            toggle_setting = "unknown_sender"
         if toggle_setting:
             callback_message = query.get("message") or {}
             callback_chat = callback_message.get("chat") or {}
@@ -1246,10 +931,6 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
                 enabled = data == "outgoing_warning:on"
                 store.set_outgoing_warning(callback_user_id, enabled)
                 text, keyboard = outgoing_warning_content(store, callback_user_id)
-            elif toggle_setting == "unknown_sender":
-                enabled = data == "unknown_sender:on"
-                store.set_unknown_sender_warning(callback_user_id, enabled)
-                text, keyboard = unknown_sender_content(store, callback_user_id)
             else:
                 if enabled:
                     allowed, permission_text = await check_delete_permission(session, store, callback_user_id)
@@ -1325,23 +1006,6 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     sender_id = (message.get("from") or {}).get("id")
     if message.get("sender_business_bot"):
         return
-
-    await try_consented_photo_test(session, store, message, owner_chat_id, owner_user_id)
-
-    # Only visible international numbers trigger this optional alert.
-    if (
-        sender_id and sender_id != owner_user_id
-        and store.unknown_sender_warning_enabled(owner_user_id)
-        and has_foreign_international_number(message)
-    ):
-        store.observe_sender(owner_user_id, int(sender_id))
-        if store.mark_foreign_number_alerted(owner_user_id, int(sender_id)):
-            await api(session, "sendMessage", {
-                "chat_id": owner_chat_id,
-                "text": foreign_number_alert(message),
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            })
 
     result = analyze(message)
     if not result:

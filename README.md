@@ -14,7 +14,6 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Pastki menyudagi **🗑 Avto o‘chirish sozlamasi** orqali foydalanuvchi Business shaxsiy chatlaridagi zararli xabarlarni avtomatik o‘chirishni yoqishi yoki o‘chirishi mumkin; standart holati o‘chiq.
 - Rejim yoqilganida APK/ishga tushiriladigan fayllar hamda barcha havolali kiruvchi xabarlar o‘chiriladi. Oddiy, qisqartirilgan va matn ichiga yashirilgan havolalar, shuningdek media izohidagi havolalar ham aniqlanadi. Faqat matnli ogohlantirish iboralari avtomatik o‘chirilmaydi. O‘chirilgan xabar haqida egasiga bot orqali xabar boradi.
 - Pastki menyudagi **⚠️ Yuborilgan xabar ogohlantirishi** orqali egasi akkauntidan APK yoki aniq shubhali havola yuborilganda oluvchiga ogohlantirish yozishni yoqish/o‘chirish mumkin; standart holati o‘chiq.
-- Pastki menyudagi **🌍 Xalqaro raqam ogohlantirishi** xabarda ochiq yozilgan/kontakt sifatida yuborilgan `+998` yoki `+7`dan boshqa xalqaro raqamni aniqlasa bir marta ogohlantiradi. Yangi yuboruvchi uchun alohida bildirishnoma yuborilmaydi.
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
 - Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; xabarlarni saqlamaydi.
 - Guruhda APK, ishga tushiriladigan fayl, istalgan havola yoki belgilangan firibgarlik iborasi topilsa, xabarni o‘chiradi va guruhga kim hamda nima yuborganini yozadi.
@@ -32,7 +31,6 @@ Shaxsiy chatlarda avto o‘chirishni yoqish uchun botda **🗑 Avto o‘chirish 
 
 Yuborilgan xabar ostiga ogohlantirish yozish uchun **⚠️ Yuborilgan xabar ogohlantirishi → ✅ Yoqish**ni tanlang va Telegram Business’da **Javob berish** huquqini bering. Telegram ayrim chatlarda xabar yuborishni cheklashi mumkin.
 
-Xalqaro raqam ogohlantirishi **🌍 Xalqaro raqam ogohlantirishi** tugmasi orqali boshqariladi. Telegram Bot API odatda yuboruvchining yashirin telefon raqamini botga bermaydi. Shu sabab faqat xabarda `+` bilan ochiq yozilgan raqamlar yoki yuborilgan kontaktning raqami tekshiriladi. Kontakt boshqa odamga tegishli bo‘lishi mumkin. Raqamning o‘zi bazada saqlanmaydi.
 
 ### Guruh moderatsiyasi
 
@@ -79,9 +77,3 @@ Avto o‘chirish uchun Telegram Business’dagi `can_delete_all_messages`, yubor
 Webhook autentifikatsiyasi, kiruvchi ma’lumot tekshiruvi, takrorlarni bloklash, shaxsiy spam cheklovi va maxfiy log formati qo‘shilgan. To‘liq amaliy ko‘rsatma va hosting cheklovlari: [SECURITY.md](SECURITY.md).
 
 Sinov: `python -m unittest -v test_security`.
-
-## Ikki akkaunt roziligi bilan bitta rasm sinovi
-
-**🧪 O‘z rasmlarimni sinash** tugmasi odatda o‘chiq bo‘lgan, 15 daqiqalik bitta rasm sinovini yaratadi. Bot Telegram Business orqali qabul qiluvchi akkauntga ulangan bo‘lishi kerak. Qabul qiluvchi sinov havolasini o‘zining ikkinchi akkauntida ochadi va yuboruvchi akkaunt alohida **Roziman**ni bosadi. Faqat shundan keyin shu yuboruvchidan kelgan bitta `photo` xabari Telegram API qayta ishlatishga ruxsat bergan `file_id` bilan egasining bot chatiga nusxalanadi. Fayl yuklab olinmaydi, `file_id` bazada saqlanmaydi; taklif tokenining faqat xeshi va rozilik holati saqlanadi.
-
-Bu bir martalik rasmlarni ochish yoki ularning himoyasini chetlab o‘tish mexanizmi emas. Telegram bunday rasmni botga `photo/file_id` ko‘rinishida bermasa yoki qayta yuborishni rad etsa, nusxa yuborilmaydi. Haqiqiy bir martalik rasm bilan ishlashi tasdiqlanmagan. Sinov mantiqi soxta Telegram API bilan tekshirilgan. Birinchi oddiy rasm ham sinov kvotasini ishlatadi. Ikkala akkaunt ham **Sinovni to‘xtatish** orqali o‘z roziligini bekor qilishi mumkin. Server qayta deploy bo‘lsa lokal bazadagi sinov bekor bo‘lishi mumkin.
