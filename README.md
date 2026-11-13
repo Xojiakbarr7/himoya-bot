@@ -6,7 +6,7 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 
 - Business akkaunt ulanishini qabul qiladi va ulanish ma’lumotlarini saqlaydi.
 - Ruxsat berilgan shaxsiy chatlardagi kiruvchi va egasi yuborgan xabarlarni tekshiradi.
-- `.apk` va ayrim ishga tushiriladigan fayllarni nomi/MIME turi bo‘yicha belgilaydi. Fayllarni yuklab olmaydi.
+- `.apk` va ayrim ishga tushiriladigan fayllarni nomi/MIME turi bo‘yicha belgilaydi. Avtomatik kuzatuvda fayllarni yuklab olmaydi.
 - Havolalarni matndan va Telegram message entity’laridan topadi.
 - Qisqartirilgan havola, IP-manzilli domen, punycode va Telegram nomiga o‘xshatilgan domenlarni mahalliy qoidalar bilan baholaydi.
 - Kod/parol so‘rash yoki shoshiltirishga o‘xshash ayrim o‘zbekcha/ruscha iboralarni aniqlaydi.
@@ -17,7 +17,7 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
 - **🛡 Xavfsizlik markazi** — Business ulanishi va himoya rejimlari holati, so‘nggi 7 kun hisoboti hamda chatlar bo‘yicha xavf hodisalarini ko‘rsatadi. Hisobotda xabar matni, fayl yoki to‘liq havola saqlanmaydi; faqat egaga tegishli chat yorlig‘i, hodisa turi, amal va xavf bahosi saqlanadi. Hisobot yozuvlari 30 kundan keyin o‘chiriladi.
 - **📝 O‘chirilgan xabarlar** — foydalanuvchi alohida rozilik bilan yoqsa, Business shaxsiy chatlaridagi oxirgi 1000 tagacha kiruvchi xabarning matni va oddiy media identifikatorini 72 soatgacha eslab turadi. `deleted_business_messages` hodisasi kelsa, oldindan ko‘rilgan matnni faqat akkaunt egasiga ko‘rsatadi. Rejim standart holatda o‘chiq.
-- Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; qo‘lda tekshirilgan xabarlar tarixga yozilmaydi.
+- Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, mahalliy qoidalar va domen bazasi bilan tekshiradi. APK alohida rozilik bilan statik tahlil qilinadi; qo‘lda tekshirilgan xabarlar tarixga yozilmaydi.
 - Guruhda APK, ishga tushiriladigan fayl, istalgan havola yoki belgilangan firibgarlik iborasi topilsa, xabarni o‘chiradi va guruhga kim hamda nima yuborganini yozadi.
 - Tarix yoqilganda matn va media identifikatori saqlanadi; fayllar yuklab olinmaydi va tashqi skanerga yuborilmaydi.
 
@@ -47,7 +47,14 @@ O‘chirish hodisasidan so‘ng bot bildirishnoma yuboradi; **Xabarlarni ko‘ri
 
 ## Muhim chegaralar
 
-Bu versiya to‘liq antivirus emas. APK faylni **zararli** deb tasdiqlamaydi; uni tekshirilmagan ilova sifatida ogohlantiradi. Havola bahosi tarmoqda manzilni ochmasdan, mahalliy belgilar asosida beriladi. Keyinroq reputatsiya xizmati yoki hash tekshiruvi qo‘shilishi mumkin.
+### Kuchaytirilgan havola va APK tekshiruvi
+
+- Havola domenlari Phishing.Database faol domenlar ro‘yxati bilan serverda solishtiriladi. Baza 6 soatda yangilanadi, saytlar ochilmaydi va foydalanuvchi havolalari tashqi xizmatga yuborilmaydi. Moslik bazada qayd borligini bildiradi; ro‘yxatda yo‘qligi xavfsizlik kafolati emas. Manba uzilsa oldingi nusxa saqlanadi, 7 kundan eski baza ishlatilmaydi. Xavfsizlik markazida yuklangan domenlar soni va holati ko‘rinadi. Litsenziya: `THIRD_PARTY_NOTICES.md`.
+- APK’ni botga qo‘lda yuboring, so‘ng **Roziman — APK’ni tekshirish** tugmasini bosing. 20 MB gacha fayl vaqtincha RAM’ga olinadi; manifestdagi kuchli ruxsatlar va SHA-256 ko‘rsatiladi. Fayl ishga tushirilmaydi, diskka saqlanmaydi va VirusTotal’ga yuklanmaydi. Bot avtomatik Business/guruh kuzatuvida faylni yuklab olmaydi.
+- VirusTotal mavjud fayl hisoboti uchun Render’da `VIRUSTOTAL_API_KEY` qo‘shilishi kerak (hisobingiz va foydalanishingizga mos API litsenziya/kvotasi bilan). Faqat SHA-256 yuboriladi. Kalit berilmaganda mahalliy APK tahlili ishlaydi va virus bazasi ulanmagani ochiq aytiladi. Xesh topilmasa, limit tugasa yoki servis javob bermasa fayl xavfsiz deb belgilanmaydi.
+- Rozilik tugmasi 15 daqiqa va bir marta amal qiladi. Bir foydalanuvchi soatiga 3 tagacha chuqur APK tekshirishi mumkin. Bu statik tekshiruv; to‘liq antivirus yoki sandbox emas.
+
+Bu versiya to‘liq antivirus emas. Avtomatik APK ogohlantirishi fayl turiga qaraydi. Qo‘lda statik tekshiruv ruxsatlar va xeshni aniqlaydi; VirusTotal ulangan bo‘lsa, bazadagi oldingi tahlil ham ko‘rsatiladi. Havola bahosi saytni ochmasdan, mahalliy belgilar va yuklangan reputatsiya ro‘yxati asosida beriladi.
 
 Bot faqat foydalanuvchi Telegram Business’da unga ochib bergan chatlardagi va ulanishdan keyin kelgan xabarlarni oladi. Chat tanlashda mavjud/yangi chatlar hamda kontaktlar/kontakt bo‘lmaganlarni tanlang. Maxfiy chatlar va ruxsat berilmagan suhbatlar botga kelmaydi. BotFather sozlamalarida Business Mode yoqilgan bo‘lishi kerak.
 

@@ -11,6 +11,9 @@
 - SQLite fayli faqat server foydalanuvchisiga ochiq (0600); SQL qiymatlari parametr bilan beriladi. Baza xabar matni va fayllarni saqlamaydi.
 - O‘chirilgan xabarlar rejimi faqat rozilik bilan yoqiladi: matn va oddiy Telegram media file_id saqlanadi (72 soat; o‘chirish aniqlansa yana 72 soat; 1000/ega, 20000/jami). HISTORY_DATABASE_URL bilan PostgreSQL/TLS, aks holda RAM. Media yuklab olinmaydi; himoyalangan, pulli va bir martalik media arxivlanmaydi. Faqat egasi ko‘radi. Rejim o‘chirilganda yoki ulanish bekor qilinganda nusxalar tozalanadi. Muddati tugagan yozuvlarni ko‘rish taqiqlanadi; fon tozalash server ishlaganda har daqiqada. Bot chatiga yuborilgan nusxalar u yerda qoladi.
 - aiohttp versiyasi belgilangan; Dependabot haftalik yangilanish PRlarini ochadi. Yangilanishlar tekshirilib, qo‘lda birlashtiriladi.
+- Phishing.Database domenlar ro‘yxati faqat belgilangan HTTPS manbadan yuklanadi (24 MB chegarasi, yo‘naltirishlarsiz). Foydalanuvchining URL’i va xabar matni tashqi bazaga yuborilmaydi. Faqat aniq domen mosligi ishlatiladi; ota domen/subdomen avtomatik aybdor deb olinmaydi. Eskirgan baza holati ko‘rsatiladi, 7 kundan eski nusxa hukm chiqarish uchun ishlatilmaydi.
+- APK chuqur tekshiruvi faqat botga qo‘lda yuborilgan fayl va egasining alohida rozilik tugmasi orqali ishlaydi. Token 15 daqiqa amal qiladi, egaga bog‘langan va bir marta ishlatiladi. 20 MB yuklash chegarasi, 2 MB manifest, 10000 ZIP yozuvi, bitta parallel skan va soatiga 3 ta so‘rov chegarasi bor. Fayl RAM’da ko‘riladi, ishga tushirilmaydi, diskka chiqarilmaydi va arxiv ochib fayl tizimiga yozilmaydi.
+- VirusTotal ixtiyoriy: VIRUSTOTAL_API_KEY berilsa, faqat SHA-256 orqali mavjud hisobot olinadi. Faylning o‘zi yoki chat matni yuborilmaydi. 404/limit/uzilish hech qachon “xavfsiz” hukmiga aylantirilmaydi. API kaliti logda yashiriladi. Ruxsatlar xavfli imkoniyatlarni bildiradi, virusni isbotlamaydi.
 
 ## Server egasi bajaradigan ishlar
 
