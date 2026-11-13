@@ -52,7 +52,7 @@ BUTTON_SCAN = "🔎 Xabarni tekshirish"
 BUTTON_HELP = "ℹ️ Qanday ishlaydi"
 BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
 BUTTON_OUTGOING_WARNING = "⚠️ Yuborilgan xabar ogohlantirishi"
-BUTTON_UNKNOWN_SENDER = "👤 Yangi akkaunt ogohlantirishi"
+BUTTON_UNKNOWN_SENDER = "🌍 Xalqaro raqam ogohlantirishi"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
@@ -319,24 +319,14 @@ def sender_display(message: dict[str, Any]) -> str:
     return html.escape(name or "Telegram foydalanuvchisi")
 
 
-def unknown_sender_alert(message: dict[str, Any], first_seen: bool, foreign_number: bool) -> str:
-    lines = ["👤 <b>Yangi yuboruvchidan xabar</b>", "", f"Yuboruvchi: {sender_display(message)}"]
-    if first_seen:
-        lines.append("Bot bu akkauntdan birinchi marta xabar oldi. Bu akkaunt yangi ochilganini anglatmaydi.")
-    if foreign_number:
-        lines.append(
-            "\n🌍 Xabarda +998 va +7 dan boshqa xalqaro telefon raqami ko‘rindi. "
-            "Bu yuboruvchining o‘z raqami ekanini anglatmaydi."
-        )
-    lines.append("\nShaxsni boshqa yo‘l bilan tekshirib oling.")
-    return "\n".join(lines)
-
-
-def trust_sender_keyboard(sender_user_id: int) -> dict[str, Any]:
-    return {"inline_keyboard": [[{
-        "text": "✅ Ishonchli deb belgilash",
-        "callback_data": f"trust_sender:{int(sender_user_id)}",
-    }]]}
+def foreign_number_alert(message: dict[str, Any]) -> str:
+    return (
+        "🌍 <b>Xalqaro raqam ogohlantirishi</b>\n\n"
+        f"Yuboruvchi: {sender_display(message)}\n"
+        "Xabarda +998 va +7 dan boshqa xalqaro telefon raqami ko‘rindi. "
+        "Bu yuboruvchining o‘z raqami ekanini anglatmaydi.\n\n"
+        "Shaxsni boshqa yo‘l bilan tekshirib oling."
+    )
 
 
 def host_from_url(url: str) -> str:
@@ -482,7 +472,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "• Ruxsat berilgan shaxsiy chatlardagi xavf belgilarini aniqlab, sizga ogohlantirish yuboradi.\n"
             "• <b>🗑 Avto o‘chirish sozlamasi</b> orqali APK/dastur fayllari va barcha havolali xabarlarni o‘chirishni o‘zingiz yoqasiz yoki o‘chirasiz.\n"
             "• <b>⚠️ Yuborilgan xabar ogohlantirishi</b> orqali akkauntingizdan APK yoki shubhali havola ketsa, oluvchiga ogohlantirish yozishni yoqasiz yoki o‘chirasiz.\n"
-            "• <b>👤 Yangi akkaunt ogohlantirishi</b> orqali bot birinchi marta yozgan yuboruvchini va xabardagi +998/+7 dan boshqa xalqaro raqamni bildiradi.\n"
+            "• <b>🌍 Xalqaro raqam ogohlantirishi</b> xabardagi +998/+7 dan boshqa xalqaro raqamni bildiradi.\n"
             "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
             "<b>Qanday yoqiladi?</b>\n"
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
@@ -597,9 +587,7 @@ def unknown_sender_content(store: Store, owner_user_id: int) -> tuple[str, dict[
     enabled = store.unknown_sender_warning_enabled(owner_user_id)
     status = "🟢 YOQILGAN" if enabled else "⚪ O‘CHIRILGAN"
     text = (
-        f"👤 <b>Yangi yuboruvchi va xalqaro raqam ogohlantirishi: {status}</b>\n\n"
-        "Yoqilganda bot sizga birinchi marta yozgan shaxsiy chat yuboruvchisi haqida xabar beradi. "
-        "Bu Telegram akkaunti yaqinda ochilgan degani emas; bot uni faqat birinchi marta ko‘rmoqda.\n\n"
+        f"🌍 <b>Xalqaro raqam ogohlantirishi: {status}</b>\n\n"
         "Xabarda ochiq ko‘rsatilgan yoki kontakt sifatida yuborilgan +raqam aniqlansa, +998 va +7 dan "
         "boshqa xalqaro raqamlar haqida ham bir marta xabar beradi. Bu raqam yuboruvchining o‘ziga tegishli "
         "bo‘lishi shart emas. Telegram botga yuboruvchining odatda yashirin telefon raqamini bermaydi."
@@ -695,7 +683,7 @@ async def handle_keyboard_button(
         await send_delete_mode_menu(session, store, chat_id)
     elif text == BUTTON_OUTGOING_WARNING:
         await send_outgoing_warning_menu(session, store, chat_id)
-    elif text == BUTTON_UNKNOWN_SENDER:
+    elif text in {BUTTON_UNKNOWN_SENDER, "👤 Yangi akkaunt ogohlantirishi"}:
         await send_unknown_sender_menu(session, store, chat_id)
     else:
         return False
@@ -900,39 +888,10 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         query = update["callback_query"]
         data = query.get("data", "")
         if data.startswith("trust_sender:"):
-            callback_message = query.get("message") or {}
-            callback_chat = callback_message.get("chat") or {}
-            callback_user_id = int((query.get("from") or {}).get("id", 0))
-            callback_chat_id = int(callback_chat.get("id", 0))
-            try:
-                trusted_sender_id = int(data.split(":", 1)[1])
-            except ValueError:
-                trusted_sender_id = 0
-            if (
-                callback_chat.get("type") != "private"
-                or callback_user_id != callback_chat_id
-                or not trusted_sender_id
-            ):
-                await api(session, "answerCallbackQuery", {
-                    "callback_query_id": query["id"],
-                    "text": "Bu tugma faqat egasining shaxsiy chatida ishlaydi.",
-                    "show_alert": True,
-                })
-                return
-            store.trust_sender(callback_user_id, trusted_sender_id)
             await api(session, "answerCallbackQuery", {
                 "callback_query_id": query["id"],
-                "text": "Yuboruvchi ishonchli deb belgilandi.",
+                "text": "Yangi yuboruvchi ogohlantirishi olib tashlangan.",
             })
-            try:
-                await api(session, "editMessageReplyMarkup", {
-                    "chat_id": callback_chat_id,
-                    "message_id": callback_message.get("message_id"),
-                    "reply_markup": {"inline_keyboard": []},
-                })
-            except TelegramAPIError as exc:
-                log.warning("Ishonchli yuboruvchi tugmasini olib tashlay olmadim: %s", exc)
-            await send_text(session, callback_chat_id, "✅ Yuboruvchi ishonchli deb belgilandi.")
             return
         toggle_setting = None
         if data in {"delete_mode:on", "delete_mode:off"}:
@@ -1033,25 +992,20 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if message.get("sender_business_bot"):
         return
 
-    # Alert on first contact even when the message has no risky link or file.
-    # The sender ID is stored, but no message text or phone number is persisted.
-    if sender_id and sender_id != owner_user_id and store.unknown_sender_warning_enabled(owner_user_id):
-        first_seen, trusted = store.observe_sender(owner_user_id, int(sender_id))
-        foreign_number = has_foreign_international_number(message)
-        foreign_alert = foreign_number and store.mark_foreign_number_alerted(
-            owner_user_id, int(sender_id)
-        )
-        first_alert = first_seen and not trusted
-        if first_alert or foreign_alert:
-            alert_payload = {
+    # Only visible international numbers trigger this optional alert.
+    if (
+        sender_id and sender_id != owner_user_id
+        and store.unknown_sender_warning_enabled(owner_user_id)
+        and has_foreign_international_number(message)
+    ):
+        store.observe_sender(owner_user_id, int(sender_id))
+        if store.mark_foreign_number_alerted(owner_user_id, int(sender_id)):
+            await api(session, "sendMessage", {
                 "chat_id": owner_chat_id,
-                "text": unknown_sender_alert(message, first_alert, bool(foreign_alert)),
+                "text": foreign_number_alert(message),
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
-            }
-            if first_alert:
-                alert_payload["reply_markup"] = trust_sender_keyboard(int(sender_id))
-            await api(session, "sendMessage", alert_payload)
+            })
 
     result = analyze(message)
     if not result:
