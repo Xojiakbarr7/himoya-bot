@@ -8,7 +8,7 @@ a configured PostgreSQL database.
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 import html
 import ipaddress
 import json
@@ -60,6 +60,7 @@ BUTTON_HELP = "ℹ️ Qanday ishlaydi"
 BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
 BUTTON_OUTGOING_WARNING = "⚠️ Yuborilgan xabar ogohlantirishi"
 BUTTON_HISTORY = "📝 O‘chirilgan xabarlar"
+BUTTON_SECURITY_CENTER = "🛡 Xavfsizlik markazi"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
@@ -67,6 +68,7 @@ MAIN_KEYBOARD = {
         [BUTTON_DELETE_MODE],
         [BUTTON_OUTGOING_WARNING],
         [BUTTON_HISTORY],
+        [BUTTON_SECURITY_CENTER],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -220,6 +222,8 @@ class PostgresMessageHistory:
             ("CREATE TABLE IF NOT EXISTS qalqon_history (connection TEXT NOT NULL, chat BIGINT NOT NULL, message BIGINT NOT NULL, owner BIGINT NOT NULL, expires DOUBLE PRECISION NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(connection,chat,message))", ()),
             ("CREATE INDEX IF NOT EXISTS qalqon_history_owner_age ON qalqon_history(owner,expires)", ()),
             ("CREATE TABLE IF NOT EXISTS qalqon_history_settings (owner BIGINT PRIMARY KEY, enabled INTEGER NOT NULL)", ()),
+            ("CREATE TABLE IF NOT EXISTS qalqon_security_events (id BIGSERIAL PRIMARY KEY, owner BIGINT NOT NULL, connection TEXT NOT NULL, chat BIGINT NOT NULL, chat_label TEXT NOT NULL, category TEXT NOT NULL, action TEXT NOT NULL, score INTEGER NOT NULL, created_at DOUBLE PRECISION NOT NULL)", ()),
+            ("CREATE INDEX IF NOT EXISTS qalqon_security_events_owner_age ON qalqon_security_events(owner,created_at)", ()),
         ])
         self.prune()
 
@@ -256,7 +260,11 @@ class PostgresMessageHistory:
             raise TelegramTemporaryError("Tarix bazasi vaqtincha mavjud emas") from None
 
     def prune(self):
-        self._execute([("DELETE FROM qalqon_history WHERE expires<=%s", (time.time(),))])
+        now = time.time()
+        self._execute([
+            ("DELETE FROM qalqon_history WHERE expires<=%s", (now,)),
+            ("DELETE FROM qalqon_security_events WHERE created_at<%s", (now - 30 * 86400,)),
+        ])
 
     def clear(self, owner):
         self._execute([("DELETE FROM qalqon_history WHERE owner=%s", (owner,))])
@@ -310,6 +318,21 @@ class PostgresMessageHistory:
 
     def detail(self, owner, token):
         return next((item for item in self.deleted(owner) if item["token"] == token), None)
+
+    def record_security_event(self, owner, connection, chat_id, chat_label, category, action, score):
+        now = time.time()
+        self._execute([
+            ("INSERT INTO qalqon_security_events(owner,connection,chat,chat_label,category,action,score,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+             (owner, connection, chat_id, chat_label, category, action, score, now)),
+            ("DELETE FROM qalqon_security_events WHERE created_at<%s", (now - 30 * 86400,)),
+            ("DELETE FROM qalqon_security_events WHERE owner=%s AND id IN (SELECT id FROM qalqon_security_events WHERE owner=%s ORDER BY created_at DESC OFFSET 1000)", (owner, owner)),
+        ])
+
+    def security_events(self, owner, since):
+        return self._execute([
+            ("DELETE FROM qalqon_security_events WHERE created_at<%s", (time.time() - 30 * 86400,)),
+            ("SELECT chat,chat_label,category,action,score,created_at FROM qalqon_security_events WHERE owner=%s AND created_at>=%s ORDER BY created_at DESC LIMIT 1000", (owner, since)),
+        ])
 
 
 DELETED_HISTORY = TemporaryMessageHistory()
@@ -384,6 +407,17 @@ class Store:
             )
         if "deleted_history" not in setting_columns:
             self.db.execute("ALTER TABLE user_settings ADD COLUMN deleted_history INTEGER NOT NULL DEFAULT 0")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS qalqon_security_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, owner_user_id INTEGER NOT NULL, "
+            "connection_id TEXT NOT NULL, chat_id INTEGER NOT NULL, chat_label TEXT NOT NULL, "
+            "category TEXT NOT NULL, action TEXT NOT NULL, score INTEGER NOT NULL, created_at REAL NOT NULL)"
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS qalqon_security_events_owner_age "
+            "ON qalqon_security_events(owner_user_id,created_at)"
+        )
+        self.db.execute("DELETE FROM qalqon_security_events WHERE created_at<?", (time.time() - 30 * 86400,))
         self.db.commit()
 
     def save_connection(self, connection: dict[str, Any]) -> None:
@@ -476,6 +510,44 @@ class Store:
             (owner, int(enabled)),
         )
         self.db.commit()
+
+    def record_security_event(
+        self, owner: int, connection: str, chat_id: int, chat_label: str,
+        category: str, action: str, score: int,
+    ) -> None:
+        if isinstance(DELETED_HISTORY, PostgresMessageHistory):
+            try:
+                DELETED_HISTORY.record_security_event(
+                    owner, connection, chat_id, chat_label, category, action, score,
+                )
+            except TelegramTemporaryError:
+                # The protection action must not fail because an optional report entry could not be saved.
+                log.warning("Xavfsizlik hisobotiga hodisani yozib bo‘lmadi")
+            return
+        now = time.time()
+        self.db.execute(
+            "INSERT INTO qalqon_security_events(owner_user_id,connection_id,chat_id,chat_label,category,action,score,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (owner, connection, chat_id, chat_label[:96], category[:32], action[:32], max(0, min(100, score)), now),
+        )
+        self.db.execute("DELETE FROM qalqon_security_events WHERE created_at<?", (now - 30 * 86400,))
+        self.db.execute(
+            "DELETE FROM qalqon_security_events WHERE owner_user_id=? AND id IN "
+            "(SELECT id FROM qalqon_security_events WHERE owner_user_id=? ORDER BY created_at DESC LIMIT -1 OFFSET 1000)",
+            (owner, owner),
+        )
+        self.db.commit()
+
+    def security_events(self, owner: int, since: float) -> list[tuple[Any, ...]]:
+        if isinstance(DELETED_HISTORY, PostgresMessageHistory):
+            return DELETED_HISTORY.security_events(owner, since)
+        self.db.execute("DELETE FROM qalqon_security_events WHERE created_at<?", (time.time() - 30 * 86400,))
+        self.db.commit()
+        return self.db.execute(
+            "SELECT chat_id,chat_label,category,action,score,created_at FROM qalqon_security_events "
+            "WHERE owner_user_id=? AND created_at>=? ORDER BY created_at DESC LIMIT 1000",
+            (owner, since),
+        ).fetchall()
 
 
     def update_processed(self, update_id: int) -> bool:
@@ -661,6 +733,26 @@ def business_outgoing_warning_reason(message: dict[str, Any], result: dict[str, 
     return ""
 
 
+def security_event_category(message: dict[str, Any], result: dict[str, Any]) -> str:
+    document = message.get("document") or {}
+    file_name = str(document.get("file_name") or result.get("file_name") or "").lower()
+    mime = str(document.get("mime_type") or "").lower()
+    if file_name.endswith(".apk") or mime == "application/vnd.android.package-archive":
+        return "APK"
+    if urls_from_message(message):
+        return "Havola"
+    return "Shubhali matn"
+
+
+def security_chat_label(message: dict[str, Any]) -> str:
+    chat = message.get("chat") or {}
+    username = str(chat.get("username") or "").strip()
+    if username:
+        return "@" + username[:95]
+    name = " ".join(str(chat.get(field) or "").strip() for field in ("first_name", "last_name")).strip()
+    return name[:96] if name else f"Chat {chat.get('id', '')}"[:96]
+
+
 def alert_message(result: dict[str, Any]) -> str:
     if result["level"] == "HAVOLA ESLATMASI":
         intro = "Xabarda havola bor. Bot saytni ochmaydi va uning xavfsizligini tasdiqlamaydi."
@@ -699,6 +791,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "• <b>⚠️ Yuborilgan xabar ogohlantirishi</b> orqali akkauntingizdan APK yoki shubhali havola ketsa, oluvchiga ogohlantirish yozishni yoqasiz yoki o‘chirasiz.\n"
             "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
             "• <b>📝 O‘chirilgan xabarlar</b> — o‘zingiz yoqsangiz, kelgan xabar matnini vaqtincha eslab turib, o‘chirilganda ko‘rsatadi.\n\n"
+            "• <b>🛡 Xavfsizlik markazi</b> — ulanish va rejim holati, so‘nggi 7 kun hisoboti hamda chatlar bo‘yicha hodisalarni ko‘rsatadi. Hisobot uchun xabar matni yoki to‘liq havola saqlanmaydi.\n\n"
             "<b>Qanday yoqiladi?</b>\n"
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
             "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>barcha xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
@@ -1061,6 +1154,117 @@ async def handle_status(session: aiohttp.ClientSession, chat_id: int) -> None:
         await send_text(session, chat_id, "Holatni tekshirib bo‘lmadi. Birozdan keyin /status ni qayta yuboring.")
 
 
+def security_report_rows(store: Store, owner: int) -> list[tuple[Any, ...]]:
+    return store.security_events(owner, time.time() - 7 * 86400)
+
+
+async def send_security_report(
+    session: aiohttp.ClientSession, store: Store, owner: int, by_chat: bool = False,
+) -> None:
+    try:
+        events = security_report_rows(store, owner)
+    except TelegramTemporaryError:
+        await send_text(session, owner, "⚠️ Hisobot bazasiga hozir ulanib bo‘lmadi. Birozdan keyin qayta urinib ko‘ring.")
+        return
+    if not events:
+        await send_text(session, owner, "📊 <b>So‘nggi 7 kun</b>\n\nHozircha qayd etilgan xavf hodisasi yo‘q.")
+        return
+
+    actions = Counter(str(row[3]) for row in events)
+    categories = Counter(str(row[2]) for row in events)
+    if by_chat:
+        chats: Counter[tuple[int, str]] = Counter()
+        for row in events:
+            chats[(int(row[0]), str(row[1]))] += 1
+        lines = ["💬 <b>Hodisalar chatlar bo‘yicha · 7 kun</b>", ""]
+        for (chat_id, label), count in chats.most_common(10):
+            lines.append(f"• {html.escape(label[:96])} — {count} ta")
+    else:
+        lines = [
+            "📊 <b>Xavfsizlik hisoboti · 7 kun</b>",
+            f"Jami xavf hodisasi: <b>{len(events)}</b>",
+            f"Avtomatik o‘chirilgan: <b>{actions['auto_deleted']}</b>",
+            f"Ogohlantirish yuborilgan: <b>{actions['alerted']}</b>",
+            f"Akkauntingizdan ogohlantirish: <b>{actions['outgoing_warning']}</b>",
+            "",
+            "<b>Hodisa turlari:</b>",
+        ]
+        lines.extend(f"• {html.escape(category)} — {count}" for category, count in categories.most_common())
+        lines.extend(["", f"Chatlar soni: <b>{len({int(row[0]) for row in events})}</b>"])
+    await api(session, "sendMessage", {
+        "chat_id": owner,
+        "text": "\n".join(lines),
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": {"inline_keyboard": [[{"text": "🛡 Xavfsizlik markaziga qaytish", "callback_data": "center:home"}]]},
+    })
+
+
+async def send_security_center(
+    session: aiohttp.ClientSession, store: Store, owner: int,
+) -> None:
+    connection_id = store.active_connection_id(owner)
+    if not connection_id:
+        connection_status = "🔴 Telegram Business ulanmagan"
+    else:
+        try:
+            info = await api(session, "getBusinessConnection", {"business_connection_id": connection_id})
+            store.save_connection(info)
+            connection_status = "🟢 Telegram Business ulangan" if info.get("is_enabled") else "🔴 Telegram Business ulanishi o‘chiq"
+        except TelegramAPIError as exc:
+            if isinstance(exc, TelegramTemporaryError):
+                raise
+            connection_status = "⚠️ Ulanish holatini tekshirib bo‘lmadi"
+    try:
+        event_count = len(security_report_rows(store, owner))
+    except TelegramTemporaryError:
+        event_count = None
+    report_status = "tekshirib bo‘lmadi" if event_count is None else f"{event_count} ta"
+    history = "🟢 yoqilgan" if store.history_enabled(owner) else "⚪ o‘chiq"
+    text = (
+        "🛡 <b>Xavfsizlik markazi</b>\n\n"
+        f"Ulanish: {connection_status}\n"
+        f"Avto o‘chirish: {'🟢 yoqilgan' if store.auto_delete_enabled(owner) else '⚪ o‘chiq'}\n"
+        f"Yuborilgan xabar ogohlantirishi: {'🟢 yoqilgan' if store.outgoing_warning_enabled(owner) else '⚪ o‘chiq'}\n"
+        f"O‘chirilgan xabarlar tarixi: {history}\n"
+        f"So‘nggi 7 kundagi hodisalar: {report_status}\n\n"
+        "Hisobotda xabar matni, fayl yoki to‘liq havola saqlanmaydi. Faqat hodisa turi va chat bo‘yicha hisob yuritiladi."
+    )
+    await api(session, "sendMessage", {
+        "chat_id": owner,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": {"inline_keyboard": [
+            [{"text": "📊 7 kunlik hisobot", "callback_data": "center:report"},
+             {"text": "💬 Chatlar bo‘yicha", "callback_data": "center:chats"}],
+            [{"text": "🗑 Avto o‘chirish", "callback_data": "center:delete"},
+             {"text": "⚠️ Yuborilgan xabar", "callback_data": "center:outgoing"}],
+            [{"text": "📝 O‘chirilgan xabarlar", "callback_data": "center:history"}],
+        ]},
+    })
+
+
+async def handle_security_center_callback(
+    session: aiohttp.ClientSession, store: Store, query: dict[str, Any],
+) -> None:
+    owner = int(query["from"]["id"])
+    data = str(query.get("data") or "")
+    await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
+    if data == "center:home":
+        await send_security_center(session, store, owner)
+    elif data == "center:report":
+        await send_security_report(session, store, owner)
+    elif data == "center:chats":
+        await send_security_report(session, store, owner, by_chat=True)
+    elif data == "center:delete":
+        await send_delete_mode_menu(session, store, owner)
+    elif data == "center:outgoing":
+        await send_outgoing_warning_menu(session, store, owner)
+    elif data == "center:history":
+        await send_history_menu(session, store, owner)
+
+
 async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]) -> None:
     chat_id = int(message["chat"]["id"])
     text = str(message.get("text") or "").strip()
@@ -1116,6 +1320,8 @@ async def handle_keyboard_button(
         await send_outgoing_warning_menu(session, store, chat_id)
     elif text == BUTTON_HISTORY:
         await send_history_menu(session, store, chat_id)
+    elif text == BUTTON_SECURITY_CENTER:
+        await send_security_center(session, store, chat_id)
     else:
         return False
     return True
@@ -1345,6 +1551,9 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if "callback_query" in update:
         query = update["callback_query"]
         data = query.get("data", "")
+        if data.startswith("center:"):
+            await handle_security_center_callback(session, store, query)
+            return
         if data.startswith("history:"):
             await handle_history_callback(session, store, query)
             return
@@ -1467,6 +1676,11 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
             await warn_recipient_about_suspicious_outgoing(
                 session, owner_chat_id, message, str(connection_id), result
             )
+            store.record_security_event(
+                owner_user_id, str(connection_id), int(message["chat"]["id"]),
+                security_chat_label(message), security_event_category(message, result),
+                "outgoing_warning", int(result.get("score", 0)),
+            )
         return
 
     if store.auto_delete_enabled(owner_user_id):
@@ -1476,6 +1690,11 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         ):
             if store.history_enabled(owner_user_id):
                 DELETED_HISTORY.remember(owner_user_id, str(connection_id), message, ignored=True)
+            store.record_security_event(
+                owner_user_id, str(connection_id), int(message["chat"]["id"]),
+                security_chat_label(message), security_event_category(message, result),
+                "auto_deleted", int(result.get("score", 0)),
+            )
             return
 
     await api(session, "sendMessage", {
@@ -1485,6 +1704,11 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         "reply_markup": alert_keyboard(result),
         "disable_web_page_preview": True,
     })
+    store.record_security_event(
+        owner_user_id, str(connection_id), int(message["chat"]["id"]),
+        security_chat_label(message), security_event_category(message, result),
+        "alerted", int(result.get("score", 0)),
+    )
     log.info("Xavfsizlik ogohlantirishi yuborildi (%s)", result["level"])
 
 
