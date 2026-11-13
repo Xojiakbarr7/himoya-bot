@@ -26,9 +26,9 @@ Bu versiya to‘liq antivirus emas. APK faylni **zararli** deb tasdiqlamaydi; un
 
 Bot faqat foydalanuvchi Telegram Business’da unga ochib bergan chatlardagi va ulanishdan keyin kelgan xabarlarni oladi. Chat tanlashda mavjud/yangi chatlar hamda kontaktlar/kontakt bo‘lmaganlarni tanlang. Maxfiy chatlar va ruxsat berilmagan suhbatlar botga kelmaydi. BotFather sozlamalarida Business Mode yoqilgan bo‘lishi kerak.
 
-Yuborilgan xabar ogohlantirishi Telegram Business’dagi **Javob berish** ruxsati va chat cheklovlariga bog‘liq; ayrim chatlarda Telegram javob yuborishni rad etishi mumkin. Avto o‘chirish rejimi esa faqat **qabul qilingan xabarlarni o‘chirish** huquqi berilganida ishlaydi. Bot shubhali belgilarni taxminiy aniqlaydi; APK’ni antivirus kabi tekshirmaydi.
+Yuborilgan xabar ogohlantirishi Telegram Business’dagi **Javob berish** ruxsati va chat cheklovlariga bog‘liq; ayrim chatlarda Telegram javob yuborishni rad etishi mumkin. Avto o‘chirish rejimi esa faqat **barcha xabarlarni o‘chirish** huquqi berilganida ishlaydi. Bot shubhali belgilarni taxminiy aniqlaydi; APK’ni antivirus kabi tekshirmaydi.
 
-Shaxsiy chatlarda avto o‘chirishni yoqish uchun botda **🗑 Avto o‘chirish sozlamasi → ✅ Yoqish** tugmasini bosing. Telegram Business → Chatbots sozlamasida **qabul qilingan xabarlarni o‘chirish** huquqini yoqing. Huquq berilmasa, bot xabarni o‘chira olmaydi va sizga ruxsat yetishmayotgani haqida xabar beradi. Bu sozlama guruh moderatsiyasiga ta’sir qilmaydi.
+Shaxsiy chatlarda avto o‘chirishni yoqish uchun botda **🗑 Avto o‘chirish sozlamasi → ✅ Yoqish** tugmasini bosing. Telegram Business → Chatbots sozlamasida **barcha xabarlarni o‘chirish** huquqini yoqing. Huquq berilmasa, bot xabarni o‘chira olmaydi va sizga ruxsat yetishmayotgani haqida xabar beradi. Bu sozlama guruh moderatsiyasiga ta’sir qilmaydi.
 
 Yuborilgan xabar ostiga ogohlantirish yozish uchun **⚠️ Yuborilgan xabar ogohlantirishi → ✅ Yoqish**ni tanlang va Telegram Business’da **Javob berish** huquqini bering. Telegram ayrim chatlarda xabar yuborishni cheklashi mumkin.
 
@@ -56,7 +56,7 @@ BotFather’da bot uchun guruhlarga qo‘shishga ruxsat bering (**Allow Groups**
    ```
 
 5. Telegram’da botni ochib `/start` bosing.
-6. Telegram **Sozlamalar → Telegram Business → Chatbots** bo‘limida botni ulang. Kerakli shaxsiy chatlarni tanlang; xabarlarni o‘qish va avto o‘chirishni ishlatmoqchi bo‘lsangiz, qabul qilingan xabarlarni o‘chirish ruxsatini bering.
+6. Telegram **Sozlamalar → Telegram Business → Chatbots** bo‘limida botni ulang. Kerakli shaxsiy chatlarni tanlang; xabarlarni o‘qish va avto o‘chirishni ishlatmoqchi bo‘lsangiz, barcha xabarlarni o‘chirish ruxsatini bering.
 
 Ulangandan so‘ng Telegram Business botga yangi xabarlar haqida `business_message` yangilanishlarini yuboradi. Render’da bot webhook orqali, kompyuterda ishga tushirganda esa long polling orqali oladi.
 
@@ -72,4 +72,4 @@ Render bepul rejasi doim uyg‘oq ishlash kafolatini bermaydi. Telegram webhook 
 
 ## Ruxsatlar
 
-Avto o‘chirish uchun Telegram Business’dagi `can_delete_received_messages`, yuborilgan xabar ogohlantirishi uchun `can_reply` huquqi kerak. Ikkala sozlama ham foydalanuvchi tanloviga ko‘ra saqlanadi va standart holatda o‘chiq turadi. Render bepul servisining fayl tizimi doimiy emasligi sabab qayta deploydan keyin sozlamalarni yana tekshirib, kerak bo‘lsa qayta yoqing.
+Avto o‘chirish uchun Telegram Business’dagi `can_delete_all_messages`, yuborilgan xabar ogohlantirishi uchun `can_reply` huquqi kerak. Ikkala sozlama ham foydalanuvchi tanloviga ko‘ra saqlanadi va standart holatda o‘chiq turadi. Render bepul servisining fayl tizimi doimiy emasligi sabab qayta deploydan keyin sozlamalarni yana tekshirib, kerak bo‘lsa qayta yoqing.
