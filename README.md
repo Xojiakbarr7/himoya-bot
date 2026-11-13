@@ -15,10 +15,13 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 - Rejim yoqilganida APK/ishga tushiriladigan fayllar hamda barcha havolali kiruvchi xabarlar o‘chiriladi. Oddiy, qisqartirilgan va matn ichiga yashirilgan havolalar, shuningdek media izohidagi havolalar ham aniqlanadi. Faqat matnli ogohlantirish iboralari avtomatik o‘chirilmaydi. O‘chirilgan xabar haqida egasiga bot orqali xabar boradi.
 - Pastki menyudagi **⚠️ Yuborilgan xabar ogohlantirishi** orqali egasi akkauntidan APK yoki aniq shubhali havola yuborilganda oluvchiga ogohlantirish yozishni yoqish/o‘chirish mumkin; standart holati o‘chiq.
 - Pastki klaviaturadagi tugmalar orqali webhook holati, maslahatlar va bot yo‘riqnomasini ko‘rsatadi.
+- **🛡 Xavfsizlik markazi** — Business ulanishi va himoya rejimlari holati, so‘nggi 7 kun hisoboti hamda chatlar bo‘yicha xavf hodisalarini ko‘rsatadi. Hisobotda xabar matni, fayl yoki to‘liq havola saqlanmaydi; faqat egaga tegishli chat yorlig‘i, hodisa turi, amal va xavf bahosi saqlanadi. Hisobot yozuvlari 30 kundan keyin o‘chiriladi.
 - **📝 O‘chirilgan xabarlar** — foydalanuvchi alohida rozilik bilan yoqsa, Business shaxsiy chatlaridagi oxirgi 1000 tagacha kiruvchi xabarning matni va oddiy media identifikatorini 72 soatgacha eslab turadi. `deleted_business_messages` hodisasi kelsa, oldindan ko‘rilgan matnni faqat akkaunt egasiga ko‘rsatadi. Rejim standart holatda o‘chiq.
 - Foydalanuvchi shubhali xabarni botga forward qilsa yoki havola, matn yoxud fayl yuborsa, qo‘lda mahalliy qoidalar bilan tekshiradi; qo‘lda tekshirilgan xabarlar tarixga yozilmaydi.
 - Guruhda APK, ishga tushiriladigan fayl, istalgan havola yoki belgilangan firibgarlik iborasi topilsa, xabarni o‘chiradi va guruhga kim hamda nima yuborganini yozadi.
 - Tarix yoqilganda matn va media identifikatori saqlanadi; fayllar yuklab olinmaydi va tashqi skanerga yuborilmaydi.
+
+Xavfsizlik markazi hisobotlari o‘chirilgan xabarlar tarixidan mustaqil: xavf aniqlanganda hodisa metama’lumoti qayd qilinadi, xabar matni yoki to‘liq havola esa hisobotga yozilmaydi. PostgreSQL ulangan bo‘lsa, hisobotlar bazada saqlanadi; u ulanmagan bo‘lsa, hisobotlar lokal server bazasida saqlanib, restartdan keyin yo‘qolishi mumkin.
 
 ## O‘chirilgan xabarlarni vaqtincha ko‘rish
 
