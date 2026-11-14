@@ -76,14 +76,15 @@ MAIN_KEYBOARD = {
         [BUTTON_HISTORY, BUTTON_SECURITY_CENTER],
         [BUTTON_DELETE_MODE, BUTTON_OUTGOING_WARNING],
         [BUTTON_STATUS, BUTTON_TIPS],
-        [BUTTON_HELP],
+        [BUTTON_HELP, "✖️ Menyuni yopish"],
     ],
     "resize_keyboard": True,
-    "is_persistent": True,
-    "one_time_keyboard": False,
+    "is_persistent": False,
+    "one_time_keyboard": True,
     "selective": False,
     "input_field_placeholder": "Tugmalardan birini tanlang",
 }
+MENU_LAUNCHER = {"inline_keyboard": [[{"text": "☰ Menyuni ochish", "callback_data": "menu:open"}]]}
 ALLOWED_UPDATES = [
     "message", "business_connection", "business_message",
     "edited_business_message", "edited_message", "callback_query", "deleted_business_messages",
@@ -597,7 +598,7 @@ async def api(session: aiohttp.ClientSession, method: str, payload: dict[str, An
         and type(payload.get("chat_id")) is int and payload["chat_id"] > 0
         and not payload.get("business_connection_id") and "reply_markup" not in payload
     ):
-        payload = {**payload, "reply_markup": MAIN_KEYBOARD}
+        payload = {**payload, "reply_markup": MENU_LAUNCHER}
     try:
         async with session.post(f"{API_BASE}/{method}", json=payload or {}, allow_redirects=False) as response:
             if response.status == 429 or response.status >= 500:
@@ -856,8 +857,10 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
         ),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-        "reply_markup": MAIN_KEYBOARD,
+        "reply_markup": {"remove_keyboard": True},
     })
+
+    await send_text(session, chat_id, "Kerakli bo‘limni ochish uchun quyidagi tugmani bosing.")
 
 
 async def send_text(session: aiohttp.ClientSession, chat_id: int, text: str) -> None:
@@ -866,7 +869,7 @@ async def send_text(session: aiohttp.ClientSession, chat_id: int, text: str) -> 
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-        "reply_markup": MAIN_KEYBOARD,
+        "reply_markup": MENU_LAUNCHER,
     })
 
 
@@ -1358,6 +1361,10 @@ async def handle_keyboard_button(
     text = str(message.get("text") or "").strip()
     text = {'🔐 Xavfsizlik maslahatlari': '🔐 Maslahatlar', '🔎 Xabarni tekshirish': '🔎 Xabar tekshirish', 'ℹ️ Qanday ishlaydi': 'ℹ️ Qo‘llanma', '🗑 Avto o‘chirish sozlamasi': '🗑 Avto o‘chirish', '⚠️ Yuborilgan xabar ogohlantirishi': '⚠️ Chiquvchi ogohlantirish', '🔬 APK tekshirish · 100 MB': '🔬 APK · 100 MB'}.get(text, text)
     chat_id = int(message["chat"]["id"])
+    if text == "✖️ Menyuni yopish":
+        await api(session, "sendMessage", {"chat_id": chat_id, "text": "Menyu yopildi.", "reply_markup": {"remove_keyboard": True}})
+        await send_text(session, chat_id, "Kerak bo‘lsa menyuni qayta oching.")
+        return True
     if text == BUTTON_STATUS:
         await handle_status(session, chat_id)
     elif text == BUTTON_TIPS:
@@ -1762,6 +1769,10 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if "callback_query" in update:
         query = update["callback_query"]
         data = query.get("data", "")
+        if data == "menu:open":
+            await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
+            await api(session, "sendMessage", {"chat_id": int(query["from"]["id"]), "text": "Kerakli bo‘limni tanlang:", "reply_markup": MAIN_KEYBOARD})
+            return
         if data.startswith("apk:scan:"):
             await handle_apk_callback(session, query)
             return
@@ -2287,6 +2298,7 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Bot to‘xtatildi")
+
 
 
 
