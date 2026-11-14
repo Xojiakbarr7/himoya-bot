@@ -36,7 +36,7 @@ class ApkUploadService:
         item = self.tokens.get(token)
         return item if item and item["expires"] > time.monotonic() else None
 
-    def register(self, app, on_scan, jobs, allow_owner):
+    def register(self, app, on_scan, jobs, allow_owner, access_owner=None):
         async def page(request):
             token = request.match_info["token"]
             if not self.valid(token):
@@ -73,6 +73,10 @@ class ApkUploadService:
                 raise web.HTTPForbidden(text="Tekshirishga rozilik talab qilinadi.")
             if request.content_length is not None and request.content_length > MAX_UPLOAD_BYTES:
                 raise web.HTTPRequestEntityTooLarge(max_size=MAX_UPLOAD_BYTES, actual_size=request.content_length)
+            if access_owner is not None and not await access_owner(item["owner"]):
+                raise web.HTTPForbidden(text="Kanal obunasini botda tasdiqlang va yangi havola oling.")
+            if self.valid(token) is not item:
+                raise web.HTTPForbidden(text="Tekshiruv havolasi eskirgan yoki ishlatilgan.")
             if self.active_uploads >= 2 or self.active_uploads + len(jobs) >= 3 or not allow_owner(item["owner"]):
                 raise web.HTTPTooManyRequests(text="Tekshiruv band yoki soatlik limit tugagan. Keyinroq urinib ko‘ring.")
             # Claim before the first await: a link can start at most one upload.

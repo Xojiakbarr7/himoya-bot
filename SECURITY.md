@@ -2,6 +2,8 @@
 
 ## Ilovadagi himoyalar
 
+- Kanal obunasi Telegram `getChatMember` orqali tekshiriladi. Botning kanal administratori ekani ham tekshiriladi; tarmoq/API xatosida foydalanish ochilmaydi. A’zolik shaxsiy menyu va yuklash POST’da qayta tekshiriladi. Eski callback yoki yuklash havolasi bilan chetlab o‘tib bo‘lmaydi. Barcha obuna callbacklari mavjud shaxsiy chat/egalik tekshiruvidan o‘tadi. Business a’zolik keshi 60 soniya, obunasiz egaga eslatma 10 daqiqada bir marta.
+
 - HTTPS webhook va kamida 32 belgili maxfiy kalit. Kalit tanada emas, sarlavhada tekshiriladi; noto‘g‘ri yoki takroriy sarlavha rad etiladi.
 - Webhook tanasi 256 KiB bilan chegaralangan; o‘qish vaqti, navbat hajmi, JSON chuqurligi va Telegram maydonlari tekshiriladi. Siqilgan tanalar, takroriy JSON kalitlari va noto‘g‘ri JSON qabul qilinmaydi.
 - Muvaffaqiyatli ishlangan update ID bazada 48 soat saqlanadi. Bir vaqtda takror kelgan webhooklar ketma-ket tekshiriladi. Jarayonning o‘rtasida uzilish bo‘lsa, ayrim tashqi amallar takrorlanishi mumkin; bu to‘liq exactly-once kafolati emas.

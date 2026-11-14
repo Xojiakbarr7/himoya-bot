@@ -26,6 +26,7 @@ import aiohttp
 from aiohttp import web
 from threat_intel import DomainReputation, HashReputation, MAX_APK_BYTES, MAX_UPLOAD_BYTES, RISK_PERMISSIONS, inspect_apk, inspect_apk_file
 from apk_upload import ApkUploadService
+from subscription import SubscriptionGate
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -52,6 +53,8 @@ DB_PATH = Path(os.environ.get("DATABASE_PATH", str(DATA_DIR / "himoya.sqlite3"))
 THREAT_INTEL = DomainReputation(DATA_DIR / "phishing_domains.txt")
 HASH_REPUTATION = HashReputation(os.environ.get("VIRUSTOTAL_API_KEY", ""))
 APK_UPLOAD_SERVICE = ApkUploadService(os.environ.get("RENDER_EXTERNAL_URL", ""))
+SUBSCRIPTION_GATE = SubscriptionGate(os.environ.get("REQUIRED_CHANNEL", "@qalqon_ai1").strip())
+REQUIRED_CHANNEL_URL = os.environ.get("REQUIRED_CHANNEL_URL", "https://t.me/qalqon_ai1").strip()
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 POLL_TIMEOUT = 30
 MAX_ALERT_TEXT = 3500
@@ -135,6 +138,7 @@ class InteractionLimiter:
 
 
 PRIVATE_LIMITER = InteractionLimiter()
+SUBSCRIPTION_NOTICE_LIMITER = InteractionLimiter(capacity=1, period=600)
 APK_SCAN_LIMITER = InteractionLimiter(capacity=3, period=3600)
 APK_REQUESTS: OrderedDict[str, dict[str, Any]] = OrderedDict()
 APK_SCAN_JOBS: set[asyncio.Task] = set()
@@ -797,6 +801,41 @@ def alert_keyboard(result: dict[str, Any]) -> dict[str, Any]:
     ]]}
 
 
+async def subscription_state(session: aiohttp.ClientSession, owner: int, force: bool = False) -> str:
+    return await SUBSCRIPTION_GATE.check(lambda method, payload: api(session, method, payload), owner, force=force)
+
+
+async def subscription_upload_allowed(session: aiohttp.ClientSession, owner: int) -> bool:
+    return await subscription_state(session, owner, force=True) == "member"
+
+
+async def send_subscription_prompt(session: aiohttp.ClientSession, owner: int, state: str) -> None:
+    text = (
+        "📢 <b>Botdan foydalanish uchun kanalimizga obuna bo‘ling.</b>\n\n"
+        "1. «Obuna bo‘lish» tugmasini bosing.\n"
+        "2. Kanalga a’zo bo‘ling.\n"
+        "3. Shu yerga qaytib «Obunani tekshirish»ni bosing."
+    )
+    if state == "unavailable":
+        text = "⚠️ <b>Obunani hozir tekshirib bo‘lmadi.</b>\n\nBot kanalga administrator qilib qo‘shilgan bo‘lishi kerak. Birozdan keyin «Obunani tekshirish»ni bosing."
+    await api(session, "sendMessage", {
+        "chat_id": owner, "text": text, "parse_mode": "HTML",
+        "reply_markup": {"inline_keyboard": [
+            [{"text": "📢 Obuna bo‘lish", "url": REQUIRED_CHANNEL_URL}],
+            [{"text": "✅ Obunani tekshirish", "callback_data": "subscription:check"}],
+        ]},
+    })
+
+
+async def business_subscription_allowed(session: aiohttp.ClientSession, owner: int, owner_chat: int) -> bool:
+    state = await subscription_state(session, owner)
+    if state == "member":
+        return True
+    if SUBSCRIPTION_NOTICE_LIMITER.allow(("subscription", owner)):
+        await send_subscription_prompt(session, owner_chat, state)
+    return False
+
+
 async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
     await api(session, "sendMessage", {
         "chat_id": chat_id,
@@ -1046,6 +1085,8 @@ async def handle_business_deletions(session: aiohttp.ClientSession, store: Store
     if not connection:
         return
     owner_chat, owner = connection
+    if not await business_subscription_allowed(session, owner, owner_chat):
+        return
     if not store.history_enabled(owner):
         return
     found, missing = DELETED_HISTORY.mark_deleted(owner, connection_id, event["chat"]["id"], event["message_ids"])
@@ -1828,6 +1869,8 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if connection is None:
         return
     owner_chat_id, owner_user_id = connection
+    if not await business_subscription_allowed(session, owner_user_id, owner_chat_id):
+        return
 
     # Business updates include incoming and outgoing messages. Warn the recipient
     # under risky messages sent from the owner's account; alert the owner about
@@ -2021,6 +2064,25 @@ async def process_authenticated_update(
         if not PRIVATE_LIMITER.allow(("callback", actor)):
             store.mark_update_processed(update_id)
             return
+    private_owner = int(message["chat"]["id"]) if message and message["chat"]["type"] == "private" else None
+    if query:
+        private_owner = int(query["from"]["id"])
+    privacy_action = query and query.get("data") in {"history:off", "history:clear"}
+    if private_owner and not privacy_action:
+        recheck = query and query.get("data") == "subscription:check"
+        if recheck:
+            await api(session, "answerCallbackQuery", {"callback_query_id": query["id"], "text": "Obuna tekshirilmoqda…"})
+        state = await subscription_state(session, private_owner, force=True)
+        if state != "member":
+            if query and not recheck:
+                await api(session, "answerCallbackQuery", {"callback_query_id": query["id"], "text": "Avval kanal obunasini tasdiqlang."})
+            await send_subscription_prompt(session, private_owner, state)
+            store.mark_update_processed(update_id)
+            return
+        if recheck:
+            await handle_start(session, private_owner)
+            store.mark_update_processed(update_id)
+            return
     await process_update(session, store, update)
     store.mark_update_processed(update_id)
 
@@ -2130,6 +2192,7 @@ def create_webhook_app(
         lambda owner, name, source: run_uploaded_apk_inspection(session, owner, name, source),
         APK_SCAN_JOBS,
         lambda owner: APK_SCAN_LIMITER.allow(("apk", owner)),
+        access_owner=lambda owner: subscription_upload_allowed(session, owner),
     )
     return app
 
@@ -2192,6 +2255,10 @@ async def run() -> None:
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         me = await api(session, "getMe")
         log.info("Bot ishga tushdi: @%s", me.get("username", "unknown"))
+        SUBSCRIPTION_GATE.bot_id = int(me["id"])
+        if SUBSCRIPTION_GATE.channel:
+            ready = await SUBSCRIPTION_GATE.admin_ready(lambda method, payload: api(session, method, payload), force=True)
+            log.info("Required channel subscription: %s; admin verification %s", SUBSCRIPTION_GATE.channel, "ready" if ready else "unavailable (add bot as channel administrator)")
         try:
             await api(session, "deleteMyCommands")
         except TelegramAPIError as exc:

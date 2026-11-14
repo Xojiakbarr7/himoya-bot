@@ -4,6 +4,8 @@ Telegram Business orqali akkaunt egasi tanlagan shaxsiy chatlardagi yangi xabarl
 
 ## Nimalar ishlaydi
 
+- Majburiy kanal obunasi: standart kanal `@qalqon_ai1`. Botni shu kanalga administrator qiling. `/start`, barcha shaxsiy menyu/callbacklar va APK yuklashdan oldin haqiqiy a’zolik tekshiriladi. **Obuna bo‘lish → Obunani tekshirish** tugmalari mavjud. Tekshiruv xatosi ruxsat bermaydi va “obuna yo‘q” holatidan alohida tushuntiriladi. Shaxsiy amallar va yuklashda holat har safar qayta tekshiriladi; Business avtomatik ishlashida 60 soniyalik a’zolik keshi bor. Obunasiz egaga Business kuzatuvi vaqtincha to‘xtaydi. Maxfiylik uchun tarixni o‘chirish/tozalash amallari doim ochiq qoladi. Guruh moderatsiyasi a’zolarni obunaga majburlamaydi.
+
 - Business akkaunt ulanishini qabul qiladi va ulanish ma’lumotlarini saqlaydi.
 - Ruxsat berilgan shaxsiy chatlardagi kiruvchi va egasi yuborgan xabarlarni tekshiradi.
 - `.apk` va ayrim ishga tushiriladigan fayllarni nomi/MIME turi bo‘yicha belgilaydi. Avtomatik kuzatuvda fayllarni yuklab olmaydi.
