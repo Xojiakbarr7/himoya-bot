@@ -62,23 +62,21 @@ WEBHOOK_PATH = "/telegram/webhook"
 MAX_WEBHOOK_BYTES = 262144
 MAX_PENDING_UPDATES = 32
 BUTTON_STATUS = "📊 Bot holati"
-BUTTON_TIPS = "🔐 Xavfsizlik maslahatlari"
-BUTTON_SCAN = "🔎 Xabarni tekshirish"
-BUTTON_HELP = "ℹ️ Qanday ishlaydi"
-BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
-BUTTON_OUTGOING_WARNING = "⚠️ Yuborilgan xabar ogohlantirishi"
+BUTTON_TIPS = "🔐 Maslahatlar"
+BUTTON_SCAN = "🔎 Xabar tekshirish"
+BUTTON_HELP = "ℹ️ Qo‘llanma"
+BUTTON_DELETE_MODE = "🗑 Avto o‘chirish"
+BUTTON_OUTGOING_WARNING = "⚠️ Chiquvchi ogohlantirish"
 BUTTON_HISTORY = "📝 O‘chirilgan xabarlar"
 BUTTON_SECURITY_CENTER = "🛡 Xavfsizlik markazi"
-BUTTON_APK_UPLOAD = "🔬 APK tekshirish · 100 MB"
+BUTTON_APK_UPLOAD = "🔬 APK · 100 MB"
 MAIN_KEYBOARD = {
     "keyboard": [
+        [BUTTON_SCAN, BUTTON_APK_UPLOAD],
+        [BUTTON_HISTORY, BUTTON_SECURITY_CENTER],
+        [BUTTON_DELETE_MODE, BUTTON_OUTGOING_WARNING],
         [BUTTON_STATUS, BUTTON_TIPS],
-        [BUTTON_SCAN, BUTTON_HELP],
-        [BUTTON_APK_UPLOAD],
-        [BUTTON_DELETE_MODE],
-        [BUTTON_OUTGOING_WARNING],
-        [BUTTON_HISTORY],
-        [BUTTON_SECURITY_CENTER],
+        [BUTTON_HELP],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -1358,6 +1356,7 @@ async def handle_keyboard_button(
     session: aiohttp.ClientSession, store: Store, message: dict[str, Any],
 ) -> bool:
     text = str(message.get("text") or "").strip()
+    text = {'🔐 Xavfsizlik maslahatlari': '🔐 Maslahatlar', '🔎 Xabarni tekshirish': '🔎 Xabar tekshirish', 'ℹ️ Qanday ishlaydi': 'ℹ️ Qo‘llanma', '🗑 Avto o‘chirish sozlamasi': '🗑 Avto o‘chirish', '⚠️ Yuborilgan xabar ogohlantirishi': '⚠️ Chiquvchi ogohlantirish', '🔬 APK tekshirish · 100 MB': '🔬 APK · 100 MB'}.get(text, text)
     chat_id = int(message["chat"]["id"])
     if text == BUTTON_STATUS:
         await handle_status(session, chat_id)
@@ -1375,7 +1374,7 @@ async def handle_keyboard_button(
         await send_text(session, chat_id,
             "🔎 <b>Qo‘lda tekshirish</b>\n\n"
             "Shubhali xabarni shu botga forward qiling yoki havola, xabar matni yoxud APK faylini yuboring.\n\n"
-            "Havola domeni xavf bazasi va mahalliy belgilar bilan tekshiriladi; sayt ochilmaydi. 20 MB gacha APK’ni botga yuboring. Kattaroq fayl uchun pastdagi 🔬 APK tekshirish · 100 MB tugmasini bosing.")
+            "Havola domeni xavf bazasi va mahalliy belgilar bilan tekshiriladi; sayt ochilmaydi. 20 MB gacha APK’ni botga yuboring. Kattaroq fayl uchun pastdagi 🔬 APK · 100 MB tugmasini bosing.")
     elif text == BUTTON_APK_UPLOAD:
         if not await offer_large_apk_upload(session, chat_id):
             await send_text(session, chat_id, "Tekshiruv sahifasi hali sozlanmagan. 20 MB gacha APK’ni shu botga yuboring.")
@@ -2288,5 +2287,6 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Bot to‘xtatildi")
+
 
 
