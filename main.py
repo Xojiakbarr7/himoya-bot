@@ -8,6 +8,7 @@ temporary upload file with explicit consent. Opt-in history stores text and medi
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import Counter, OrderedDict, deque
 import html
 import ipaddress
@@ -64,7 +65,7 @@ MAX_PENDING_UPDATES = 32
 BUTTON_STATUS = "📊 Bot holati"
 BUTTON_TIPS = "🔐 Maslahatlar"
 BUTTON_SCAN = "🔎 Xabar tekshirish"
-BUTTON_HELP = "ℹ️ Qo‘llanma"
+BUTTON_HELP = "🎬 Video qo‘llanma"
 BUTTON_DELETE_MODE = "🗑 Avto o‘chirish"
 BUTTON_OUTGOING_WARNING = "⚠️ Chiquvchi ogohlantirish"
 BUTTON_HISTORY = "📝 O‘chirilgan xabarlar"
@@ -84,7 +85,7 @@ MAIN_KEYBOARD = {
     "selective": False,
     "input_field_placeholder": "Tugmalardan birini tanlang",
 }
-MENU_LAUNCHER = {"inline_keyboard": [[{"text": "☰ Menyuni ochish", "callback_data": "menu:open"}]]}
+MENU_LAUNCHER = {"inline_keyboard": [[{"text": "☰ Menyuni ochish", "callback_data": "menu:open"}], [{"text": "🎬 Video qo‘llanma", "callback_data": "guide:watch"}]]}
 ALLOWED_UPDATES = [
     "message", "business_connection", "business_message",
     "edited_business_message", "edited_message", "callback_query", "deleted_business_messages",
@@ -1355,6 +1356,58 @@ async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]
         await send_text(session, chat_id, "🛡 Kerakli bo‘limni pastdagi menyudan tanlang.")
 
 
+
+GUIDE_SETUP_HASH = "3e477f911e270b3d678e88f7f662742035a6e6b1f6bc7294748a67f6ea529c60"
+
+def guide_record(store: Store, value: dict | None = None) -> dict:
+    if isinstance(DELETED_HISTORY, PostgresMessageHistory):
+        DELETED_HISTORY._execute([("CREATE TABLE IF NOT EXISTS qalqon_bot_assets (name TEXT PRIMARY KEY, payload TEXT NOT NULL)", ())])
+        if value is not None:
+            DELETED_HISTORY._execute([("INSERT INTO qalqon_bot_assets(name,payload) VALUES(%s,%s) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload", ("video_guide", json.dumps(value)))])
+        rows = DELETED_HISTORY._execute([("SELECT payload FROM qalqon_bot_assets WHERE name=%s", ("video_guide",))])
+    else:
+        if value is not None:
+            store.db.execute("INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("video_guide", json.dumps(value)))
+            store.db.commit()
+        rows = store.db.execute("SELECT value FROM state WHERE key=?", ("video_guide",)).fetchall()
+    return json.loads(rows[0][0]) if rows else {}
+
+async def send_video_guide(session, store, owner):
+    record = guide_record(store)
+    if not record.get("file_id"):
+        await send_text(session, owner, "🎬 Video qo‘llanma tayyorlanmoqda. Hozircha ℹ️ /help orqali yozma qo‘llanmani oching.")
+        return
+    await api(session, "sendVideo", {"chat_id": owner, "video": record["file_id"], "supports_streaming": True,
+        "caption": "🛡 Qalqon AI — video qo‘llanma\n\nBotni ulash va undan foydalanishni videoda ko‘ring.", "reply_markup": MENU_LAUNCHER})
+
+async def accept_video_guide(session, store, message):
+    caption = str(message.get("caption") or "")
+    if not caption.startswith("/setguide "):
+        return False
+    owner = int(message["chat"]["id"])
+    supplied = caption.split(maxsplit=1)[1].strip()
+    if not secrets.compare_digest(hashlib.sha256(supplied.encode()).hexdigest(), GUIDE_SETUP_HASH):
+        await send_text(session, owner, "Qo‘llanmani o‘zgartirishga ruxsat yo‘q.")
+        return True
+    record = guide_record(store)
+    if record.get("owner") not in (None, owner):
+        await send_text(session, owner, "Qo‘llanmani faqat uning administratori yangilashi mumkin.")
+        return True
+    video = message.get("video")
+    if not isinstance(video, dict) or not video.get("file_id"):
+        await send_text(session, owner, "Videoni video shaklida yuboring va izohiga sozlash kodini yozing.")
+        return True
+    guide_record(store, {"owner": owner, "file_id": video["file_id"]})
+    # Remove setup caption containing the one-time setup credential from the chat.
+    try:
+        await api(session, "deleteMessage", {"chat_id": owner, "message_id": message["message_id"]})
+    except TelegramAPIError:
+        pass
+    await send_text(session, owner, "✅ Video qo‘llanma saqlandi. Endi barcha foydalanuvchilar 🎬 Video qo‘llanma tugmasidan ko‘ra oladi.")
+    await send_video_guide(session, store, owner)
+    return True
+
+
 async def handle_keyboard_button(
     session: aiohttp.ClientSession, store: Store, message: dict[str, Any],
 ) -> bool:
@@ -1375,8 +1428,8 @@ async def handle_keyboard_button(
             "• Havola domenini tekshirmasdan ochmang va kod kiritmang.\n"
             "• Ikki bosqichli tasdiqlashni Telegram sozlamalarida yoqing.\n\n"
             "Ogohlantirish xavf belgisi borligini bildiradi; bot faylni antivirus kabi tahlil qilmaydi.")
-    elif text == BUTTON_HELP:
-        await handle_command(session, {**message, "text": "/help"})
+    elif text in {BUTTON_HELP, "ℹ️ Qo‘llanma"}:
+        await send_video_guide(session, store, chat_id)
     elif text == BUTTON_SCAN:
         await send_text(session, chat_id,
             "🔎 <b>Qo‘lda tekshirish</b>\n\n"
@@ -1746,6 +1799,8 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         if chat_type in {"group", "supergroup"}:
             await moderate_group_message(session, message)
             return
+        if chat_type == "private" and await accept_video_guide(session, store, message):
+            return
         text = str(message.get("text") or "")
         if text.startswith("/"):
             await handle_command(session, message)
@@ -1769,6 +1824,10 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
     if "callback_query" in update:
         query = update["callback_query"]
         data = query.get("data", "")
+        if data == "guide:watch":
+            await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
+            await send_video_guide(session, store, int(query["from"]["id"]))
+            return
         if data == "menu:open":
             await api(session, "answerCallbackQuery", {"callback_query_id": query["id"]})
             await api(session, "sendMessage", {"chat_id": int(query["from"]["id"]), "text": "Kerakli bo‘limni tanlang:", "reply_markup": MAIN_KEYBOARD})
@@ -2298,6 +2357,7 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Bot to‘xtatildi")
+
 
 
 
