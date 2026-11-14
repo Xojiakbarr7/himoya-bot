@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Qalqon AI — APK tekshirish</title>
+<style nonce="__NONCE__">
+*{box-sizing:border-box}body{margin:0;background:#0a101c;color:#f1f5ff;font:17px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:520px;margin:auto;padding:32px 22px 48px}.brand{color:#64dfc5;font-weight:750;letter-spacing:.06em;font-size:14px}.badge{display:inline-block;background:#163b37;color:#8cf2dc;padding:6px 13px;border-radius:30px;margin-top:22px;font-size:14px}h1{font-size:32px;line-height:1.2;margin:16px 0}p{color:#acbcd1}form{background:#142033;padding:22px;border:1px solid #26364c;border-radius:22px;margin-top:26px}.file{display:block;padding:20px 14px;border:2px dashed #487c8f;border-radius:14px;cursor:pointer}.file span{display:block;font-weight:650}.file small{display:block;color:#b7c5d8;margin-top:6px}input[type=file]{display:block;max-width:100%;margin-top:12px;font:inherit;font-size:14px}.consent{display:flex;gap:12px;margin:22px 0;font-size:15px;color:#c7d3e3}.consent input{flex-shrink:0;width:21px;height:21px;margin-top:3px;accent-color:#69e4c7}button{width:100%;border:0;border-radius:12px;background:#64dfc5;color:#052b25;padding:15px;font:inherit;font-weight:750;cursor:pointer}button:disabled{opacity:.5;cursor:wait}progress{width:100%;height:12px;margin-top:22px;accent-color:#64dfc5}#status{font-size:15px;margin-bottom:0;overflow-wrap:anywhere}footer{font-size:13px;color:#90a4be;margin-top:23px}a{display:inline-block;color:#86ead4;margin-top:16px}input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #f4d28a;outline-offset:4px}
+</style>
+</head>
+<body><main>
+<div class="brand">🛡 QALQON AI</div>
+<div class="badge">100 MB gacha</div>
+<h1>APK’ni tekshiring</h1>
+<p>Telefoningizdagi APK faylini tanlang. Tekshiruv natijasi Telegram’dagi bot chattingizga keladi.</p>
+<form id="upload">
+<label class="file"><span>📎 APK faylini tanlash</span><small>Faqat .apk · Eng ko‘pi 100 MB</small><input id="file" type="file" accept=".apk,application/vnd.android.package-archive" required></label>
+<label class="consent"><input id="consent" type="checkbox" required><span>Faylni tekshirishga roziman. U vaqtinchalik server fayliga olinadi, tekshiruvdan keyin o‘chiriladi. Fayl ishga tushirilmaydi va tashqi skanerga yuborilmaydi. VirusTotal yoqilgan bo‘lsa, faqat SHA-256 xeshi yuboriladi.</span></label>
+<button id="submit" type="submit">Tekshirishni boshlash</button>
+<progress id="progress" max="100" value="0" aria-label="Yuklash jarayoni" hidden></progress>
+<p id="status" role="status" aria-live="polite">Havola 15 daqiqa va bir marta amal qiladi.</p>
+</form>
+<footer>Bot APK ruxsatlari va fayl xeshini tekshiradi. Bu to‘liq antivirus emas; xavf belgisi topilmagani xavfsizlik kafolati bo‘lmaydi.</footer>
+<a href="https://t.me/Qalqonn_bot" rel="noreferrer">← Qalqon AI botiga qaytish</a>
+</main>
+<script nonce="__NONCE__">
+const form=document.getElementById('upload'), file=document.getElementById('file'), status=document.getElementById('status'), button=document.getElementById('submit'), progress=document.getElementById('progress');
+form.addEventListener('submit',event=>{
+ event.preventDefault();const selected=file.files[0];
+ if(!selected||!selected.name.toLowerCase().endsWith('.apk')){status.textContent='Iltimos, .apk faylini tanlang.';return;}
+ if(selected.size===0||selected.size>100*1024*1024){status.textContent='Fayl bo‘sh bo‘lmasin va 100 MB dan oshmasin.';return;}
+ if(!document.getElementById('consent').checked){status.textContent='Avval tekshiruvga rozilik bering.';return;}
+ button.disabled=true;file.disabled=true;progress.hidden=false;status.textContent='Fayl yuklanmoqda. Sahifani ochiq qoldiring.';
+ const request=new XMLHttpRequest();request.open('POST',location.pathname);request.timeout=310000;
+ request.setRequestHeader('Content-Type','application/octet-stream');request.setRequestHeader('X-Upload-Token','__TOKEN__');request.setRequestHeader('X-Scan-Consent','yes');
+ request.upload.onprogress=event=>{if(event.lengthComputable){const n=Math.round(event.loaded/event.total*100);progress.value=n;status.textContent=n===100?'Fayl qabul qilinmoqda…':`Yuklanmoqda: ${n}%`;}};
+ request.onload=()=>{if(request.status===202){progress.value=100;status.textContent='✅ Fayl qabul qilindi. Natija bot chattingizga keladi. Telegramga qaytishingiz mumkin.';button.textContent='Fayl qabul qilindi';}else{status.textContent='⚠️ '+(request.responseText.length<350?request.responseText:'Faylni yuklab bo‘lmadi. Botdan yangi havola olib urinib ko‘ring.');button.textContent='Botdan yangi havola oling';}};
+ request.onerror=request.ontimeout=()=>{status.textContent='⚠️ Yuklash uzildi. Botdan yangi havola oling va yana urinib ko‘ring.';button.textContent='Yuklash tugamadi';};
+ request.send(selected);
+});
+</script></body></html>

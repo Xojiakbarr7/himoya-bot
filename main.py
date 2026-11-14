@@ -1,8 +1,8 @@
 """Telegram Business security assistant.
 
 Monitors only business chats explicitly granted to the bot. Automatic monitoring
-does not download files. Owner-requested APK inspection reads a bounded file in
-memory with explicit consent. Opt-in history stores text and media identifiers.
+does not download files. Owner-requested APK inspection uses bounded memory or a
+temporary upload file with explicit consent. Opt-in history stores text and media identifiers.
 """
 
 from __future__ import annotations
@@ -24,7 +24,8 @@ from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
-from threat_intel import DomainReputation, HashReputation, MAX_APK_BYTES, RISK_PERMISSIONS, inspect_apk
+from threat_intel import DomainReputation, HashReputation, MAX_APK_BYTES, MAX_UPLOAD_BYTES, RISK_PERMISSIONS, inspect_apk, inspect_apk_file
+from apk_upload import ApkUploadService
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -50,6 +51,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 DB_PATH = Path(os.environ.get("DATABASE_PATH", str(DATA_DIR / "himoya.sqlite3")))
 THREAT_INTEL = DomainReputation(DATA_DIR / "phishing_domains.txt")
 HASH_REPUTATION = HashReputation(os.environ.get("VIRUSTOTAL_API_KEY", ""))
+APK_UPLOAD_SERVICE = ApkUploadService(os.environ.get("RENDER_EXTERNAL_URL", ""))
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 POLL_TIMEOUT = 30
 MAX_ALERT_TEXT = 3500
@@ -64,10 +66,12 @@ BUTTON_DELETE_MODE = "🗑 Avto o‘chirish sozlamasi"
 BUTTON_OUTGOING_WARNING = "⚠️ Yuborilgan xabar ogohlantirishi"
 BUTTON_HISTORY = "📝 O‘chirilgan xabarlar"
 BUTTON_SECURITY_CENTER = "🛡 Xavfsizlik markazi"
+BUTTON_APK_UPLOAD = "🔬 APK tekshirish · 100 MB"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_STATUS, BUTTON_TIPS],
         [BUTTON_SCAN, BUTTON_HELP],
+        [BUTTON_APK_UPLOAD],
         [BUTTON_DELETE_MODE],
         [BUTTON_OUTGOING_WARNING],
         [BUTTON_HISTORY],
@@ -810,7 +814,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
             "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>barcha xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
             "3. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
-            "🔬 APK’ni shu botga yuborib, rozilik tugmasini bossangiz, ruxsatlari va SHA-256 xeshi tekshiriladi. Havola domenlari Phishing.Database ro‘yxati bilan solishtiriladi.\n\n"
+            "🔬 <b>APK tekshirish · 100 MB</b> tugmasi orqali katta APK’ni tanlab, ruxsatlari va SHA-256 xeshini tekshirtiring. 20 MB gacha faylni botga bevosita yuborish ham mumkin. Havola domenlari Phishing.Database ro‘yxati bilan solishtiriladi.\n\n"
             "⚠️ Bot to‘liq antivirus emas. Avtomatik kuzatuv fayllarni yuklab olmaydi; chuqur APK tekshiruvi faqat roziligingiz bilan bajariladi. Tarix rejimi yoqilsa matn va media identifikatori 3 kungacha saqlanadi."
         ),
         "parse_mode": "HTML",
@@ -1330,7 +1334,10 @@ async def handle_keyboard_button(
         await send_text(session, chat_id,
             "🔎 <b>Qo‘lda tekshirish</b>\n\n"
             "Shubhali xabarni shu botga forward qiling yoki havola, xabar matni yoxud APK faylini yuboring.\n\n"
-            "Havola domeni xavf bazasi va mahalliy belgilar bilan tekshiriladi; sayt ochilmaydi. APK yuborsangiz, alohida rozilik bilan 20 MB gacha faylning ruxsatlari va xeshini tekshirtirishingiz mumkin.")
+            "Havola domeni xavf bazasi va mahalliy belgilar bilan tekshiriladi; sayt ochilmaydi. 20 MB gacha APK’ni botga yuboring. Kattaroq fayl uchun pastdagi 🔬 APK tekshirish · 100 MB tugmasini bosing.")
+    elif text == BUTTON_APK_UPLOAD:
+        if not await offer_large_apk_upload(session, chat_id):
+            await send_text(session, chat_id, "Tekshiruv sahifasi hali sozlanmagan. 20 MB gacha APK’ni shu botga yuboring.")
     elif text == BUTTON_DELETE_MODE:
         await send_delete_mode_menu(session, store, chat_id)
     elif text == BUTTON_OUTGOING_WARNING:
@@ -1386,8 +1393,12 @@ async def offer_apk_inspection(session: aiohttp.ClientSession, message: dict[str
     if not isinstance(file_id, str) or not 0 < len(file_id) <= 512:
         return
     size = document.get("file_size", 0)
-    if type(size) is not int or size < 0 or size > MAX_APK_BYTES:
-        await send_text(session, owner, "🔬 Chuqur tekshiruv uchun APK hajmi 20 MB dan oshmasligi kerak.")
+    if type(size) is not int or size < 0 or size > MAX_UPLOAD_BYTES:
+        await send_text(session, owner, "🔬 Tekshiruv uchun APK hajmi 100 MB dan oshmasligi kerak.")
+        return
+    if size > MAX_APK_BYTES:
+        if not await offer_large_apk_upload(session, owner, str(document.get("file_name") or "yuklangan.apk")):
+            await send_text(session, owner, "20 MB dan katta fayl uchun tekshiruv sahifasi sozlanishi kerak.")
         return
     now = time.monotonic()
     for token in [token for token, item in APK_REQUESTS.items() if item["expires"] <= now or item["owner"] == owner]:
@@ -1429,31 +1440,7 @@ async def run_apk_inspection(session: aiohttp.ClientSession, owner: int, request
                         raise ValueError("Fayl hajmi 20 MB dan katta")
             report = await asyncio.to_thread(inspect_apk, bytes(data))
             data.clear()
-            reputation = await HASH_REPUTATION.lookup(session, report["sha256"])
-            lines = ["🔬 <b>APK tekshiruvi</b>", html.escape(request["name"]), ""]
-            if report["manifest_read"]:
-                lines.append("<b>Kuchli ruxsatlar:</b>")
-                lines.extend("• " + RISK_PERMISSIONS[p] for p in report["permissions"])
-                if not report["permissions"]:
-                    lines.append("Tekshirilgan kuchli ruxsatlar topilmadi.")
-                lines.append("Bu ruxsatlar foydali ilovalarda ham bo‘lishi mumkin; ular virus ekanini isbotlamaydi.")
-            else:
-                lines.append("⚠️ APK manifestini o‘qib bo‘lmadi. Fayl buzilgan, boshqa turda yoki qo‘llab-quvvatlanmaydigan bo‘lishi mumkin.")
-            lines.append("")
-            if reputation["status"] == "found":
-                lines.append(f"<b>VirusTotal hisoboti:</b> {reputation['malicious']} zararli, {reputation['suspicious']} shubhali belgi.")
-                if not reputation["malicious"] and not reputation["suspicious"]:
-                    lines.append("Bazadagi tekshiruvda zararli belgi topilmagan. Bu xavfsizlik kafolati emas.")
-                else:
-                    lines.append("⚠️ Ushbu faylni o‘rnatmang; bazada xavf belgilari bor.")
-            else:
-                status_text = {"disabled": "Virus bazasi ulanmagan. Hozir faqat mahalliy ruxsatlar tahlili bajarildi.",
-                               "not_found": "Bu fayl xeshi VirusTotal bazasida topilmadi. Xavfsiz deb hisoblamang.",
-                               "rate_limited": "VirusTotal tekshiruvi limiti tugagan. Mahalliy tahlil bajarildi.",
-                               "unavailable": "VirusTotal hozir javob bermadi. Mahalliy tahlil bajarildi."}
-                lines.append("⚠️ " + status_text[reputation["status"]])
-            lines.extend(["", "SHA-256:", "<code>" + report["sha256"] + "</code>", "", "Fayl ishga tushirilmadi va tashqi skanerga yuklanmadi."])
-            await send_text(session, owner, "\n".join(lines))
+            await send_apk_report(session, owner, request["name"], report)
     except (aiohttp.ClientError, asyncio.TimeoutError, TelegramAPIError, ValueError, OSError) as exc:
         # Network exception text may contain a token-bearing Telegram URL.
         log.warning("APK inspection could not finish (%s)", type(exc).__name__)
@@ -1461,6 +1448,67 @@ async def run_apk_inspection(session: aiohttp.ClientSession, owner: int, request
             await send_text(session, owner, "⚠️ APK tekshiruvini tugatib bo‘lmadi. Fayl 20 MB dan kichik bo‘lsin; uni botga qayta yuborib urinib ko‘ring.")
         except TelegramAPIError:
             pass
+
+
+async def offer_large_apk_upload(session: aiohttp.ClientSession, owner: int, name: str = "yuklangan.apk") -> bool:
+    origin = APK_UPLOAD_SERVICE.origin
+    parsed = urlsplit(origin)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
+        return False
+    token = APK_UPLOAD_SERVICE.issue(owner, name)
+    await api(session, "sendMessage", {
+        "chat_id": owner,
+        "text": "🔬 <b>100 MB gacha APK tekshirish</b>\n\nTugmani bosing, telefoningiz yoki kompyuteringizdan APK faylini tanlang va tekshirishga rozilik bering. Natija shu bot chatiga keladi.\n\nFayl vaqtinchalik server fayliga olinib, tekshiruvdan keyin o‘chiriladi. Fayl ishga tushirilmaydi. Havola faqat sizning natijangiz uchun, 15 daqiqa va bir marta amal qiladi.",
+        "parse_mode": "HTML",
+        "reply_markup": {"inline_keyboard": [[{"text": "📤 100 MB gacha APK yuklash", "web_app": {"url": f"{origin}/apk-upload/{token}"}}]]},
+    })
+    return True
+
+
+async def run_uploaded_apk_inspection(session: aiohttp.ClientSession, owner: int, name: str, source) -> None:
+    try:
+        async with APK_SCAN_SEMAPHORE:
+            worker = asyncio.create_task(asyncio.to_thread(inspect_apk_file, source))
+            try:
+                report = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                await worker
+                raise
+            await send_apk_report(session, owner, name, report)
+    except (ValueError, OSError, TelegramAPIError) as exc:
+        log.warning("Uploaded APK inspection failed (%s)", type(exc).__name__)
+        try:
+            await send_text(session, owner, "⚠️ Yuklangan APK’ni tekshirib bo‘lmadi. Botdan yangi havola olib qayta urinib ko‘ring.")
+        except TelegramAPIError:
+            pass
+
+
+async def send_apk_report(session: aiohttp.ClientSession, owner: int, name: str, report: dict[str, Any]) -> None:
+    reputation = await HASH_REPUTATION.lookup(session, report["sha256"])
+    lines = ["🔬 <b>APK tekshiruvi</b>", html.escape(name), ""]
+    if report["manifest_read"]:
+        lines.append("<b>Kuchli ruxsatlar:</b>")
+        lines.extend("• " + RISK_PERMISSIONS[p] for p in report["permissions"])
+        if not report["permissions"]:
+            lines.append("Tekshirilgan kuchli ruxsatlar topilmadi.")
+        lines.append("Bu ruxsatlar foydali ilovalarda ham bo‘lishi mumkin; ular virus ekanini isbotlamaydi.")
+    else:
+        lines.append("⚠️ APK manifestini o‘qib bo‘lmadi. Fayl buzilgan, boshqa turda yoki qo‘llab-quvvatlanmaydigan bo‘lishi mumkin.")
+    lines.append("")
+    if reputation["status"] == "found":
+        lines.append(f"<b>VirusTotal hisoboti:</b> {reputation['malicious']} zararli, {reputation['suspicious']} shubhali belgi.")
+        if not reputation["malicious"] and not reputation["suspicious"]:
+            lines.append("Bazadagi tekshiruvda zararli belgi topilmagan. Bu xavfsizlik kafolati emas.")
+        else:
+            lines.append("⚠️ Ushbu faylni o‘rnatmang; bazada xavf belgilari bor.")
+    else:
+        status_text = {"disabled": "Virus bazasi ulanmagan. Hozir faqat mahalliy ruxsatlar tahlili bajarildi.",
+                       "not_found": "Bu fayl xeshi VirusTotal bazasida topilmadi. Xavfsiz deb hisoblamang.",
+                       "rate_limited": "VirusTotal tekshiruvi limiti tugagan. Mahalliy tahlil bajarildi.",
+                       "unavailable": "VirusTotal hozir javob bermadi. Mahalliy tahlil bajarildi."}
+        lines.append("⚠️ " + status_text[reputation["status"]])
+    lines.extend(["", "SHA-256:", "<code>" + report["sha256"] + "</code>", "", "Fayl ishga tushirilmadi va tashqi skanerga yuklanmadi."])
+    await send_text(session, owner, "\n".join(lines))
 
 
 async def handle_apk_callback(session: aiohttp.ClientSession, query: dict[str, Any]) -> None:
@@ -2069,7 +2117,7 @@ def create_webhook_app(
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+        response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
         response.headers["Strict-Transport-Security"] = "max-age=31536000"
 
     app = web.Application(client_max_size=MAX_WEBHOOK_BYTES)
@@ -2077,6 +2125,12 @@ def create_webhook_app(
     app.router.add_get("/", health)
     app.router.add_get("/healthz", health)
     app.router.add_post(WEBHOOK_PATH, webhook)
+    APK_UPLOAD_SERVICE.register(
+        app,
+        lambda owner, name, source: run_uploaded_apk_inspection(session, owner, name, source),
+        APK_SCAN_JOBS,
+        lambda owner: APK_SCAN_LIMITER.allow(("apk", owner)),
+    )
     return app
 
 

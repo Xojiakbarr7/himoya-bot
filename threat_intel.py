@@ -20,6 +20,7 @@ import aiohttp
 log = logging.getLogger("telegram_himoya")
 FEED_URL = "https://raw.githubusercontent.com/Phishing-Database/Phishing.Database/master/phishing-domains-ACTIVE.txt"
 MAX_APK_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 SHARED_HOSTS = {"t.me", "telegram.org", "telegram.me", "github.com", "raw.githubusercontent.com",
                 "drive.google.com", "docs.google.com", "youtube.com", "www.youtube.com"}
@@ -216,18 +217,35 @@ def manifest_permissions(data: bytes) -> set[str]:
 def inspect_apk(data: bytes) -> dict:
     if len(data) > MAX_APK_BYTES:
         raise ValueError("APK too large")
-    result = {"sha256": hashlib.sha256(data).hexdigest(), "permissions": [], "valid_apk": False, "manifest_read": False}
+    return inspect_apk_file(io.BytesIO(data))
+
+
+def inspect_apk_file(source) -> dict:
+    """Scan a seekable stream without loading a large APK into RAM."""
+    source.seek(0, 2)
+    size = source.tell()
+    if size > MAX_UPLOAD_BYTES:
+        raise ValueError("APK too large")
+    source.seek(0)
+    digest = hashlib.sha256()
+    while chunk := source.read(65536):
+        digest.update(chunk)
+    result = {"sha256": digest.hexdigest(), "permissions": [], "valid_apk": False, "manifest_read": False}
     try:
         # Bound central-directory allocation before ZipFile constructs entry objects.
-        eocd = data.rfind(b"PK\x05\x06", max(0, len(data) - 65557))
-        if eocd < 0 or eocd + 22 > len(data):
+        tail_start = max(0, size - 65557)
+        source.seek(tail_start)
+        tail = source.read(65557)
+        eocd = tail.rfind(b"PK\x05\x06")
+        if eocd < 0 or eocd + 22 > len(tail):
             return result
-        disk, directory_disk, disk_count, count, directory_size, directory_offset, comment_size = struct.unpack_from("<HHHHIIH", data, eocd + 4)
+        disk, directory_disk, disk_count, count, directory_size, directory_offset, comment_size = struct.unpack_from("<HHHHIIH", tail, eocd + 4)
         if (disk or directory_disk or disk_count != count or count > 10000
-                or directory_size > 4 * 1024 * 1024 or directory_offset + directory_size > eocd
-                or eocd + 22 + comment_size != len(data)):
+                or directory_size > 4 * 1024 * 1024 or directory_offset + directory_size > tail_start + eocd
+                or eocd + 22 + comment_size != len(tail)):
             return result
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        source.seek(0)
+        with zipfile.ZipFile(source) as archive:
             if len(archive.infolist()) > 10000:
                 raise ValueError("Too many APK entries")
             info = archive.getinfo("AndroidManifest.xml")
