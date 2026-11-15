@@ -465,12 +465,38 @@ class Store:
         ).fetchone()
         return (int(row[0]), int(row[1])) if row else None
 
+    def _protection_setting(self, owner: int, key: str, value: bool | None = None) -> bool:
+        if key not in {"auto_delete_harmful", "outgoing_warning"}:
+            raise ValueError("Unknown protection setting")
+        url = os.environ.get("HISTORY_DATABASE_URL", "").strip()
+        if not url:
+            row = self.db.execute(f"SELECT {key} FROM user_settings WHERE owner_user_id=?", (owner,)).fetchone()
+            return bool(row[0]) if row else False
+        backend = getattr(self, "_protection_backend", None)
+        if backend is None:
+            if isinstance(DELETED_HISTORY, PostgresMessageHistory):
+                backend = DELETED_HISTORY
+            else:
+                import psycopg
+                backend = PostgresMessageHistory.__new__(PostgresMessageHistory)
+                backend.driver, backend.url = psycopg, url
+            backend._execute([("CREATE TABLE IF NOT EXISTS qalqon_protection_settings (owner BIGINT NOT NULL, setting TEXT NOT NULL, enabled INTEGER NOT NULL, PRIMARY KEY(owner,setting))", ())])
+            self._protection_backend = backend
+        if value is not None:
+            backend._execute([("INSERT INTO qalqon_protection_settings(owner,setting,enabled) VALUES(%s,%s,%s) ON CONFLICT(owner,setting) DO UPDATE SET enabled=excluded.enabled", (owner, key, int(value)))])
+            return value
+        rows = backend._execute([("SELECT enabled FROM qalqon_protection_settings WHERE owner=%s AND setting=%s", (owner, key))])
+        if not rows:
+            # Migrate existing local choice once, never overwrite a durable choice.
+            local = self.db.execute(f"SELECT {key} FROM user_settings WHERE owner_user_id=?", (owner,)).fetchone()
+            rows = backend._execute([
+                ("INSERT INTO qalqon_protection_settings(owner,setting,enabled) VALUES(%s,%s,%s) ON CONFLICT(owner,setting) DO NOTHING", (owner, key, int(bool(local[0])) if local else 0)),
+                ("SELECT enabled FROM qalqon_protection_settings WHERE owner=%s AND setting=%s", (owner, key)),
+            ])
+        return bool(rows[0][0])
+
     def auto_delete_enabled(self, owner_user_id: int) -> bool:
-        row = self.db.execute(
-            "SELECT auto_delete_harmful FROM user_settings WHERE owner_user_id=?",
-            (int(owner_user_id),),
-        ).fetchone()
-        return bool(row[0]) if row else False
+        return self._protection_setting(int(owner_user_id), "auto_delete_harmful")
 
     def active_connection_id(self, owner_user_id: int) -> str | None:
         row = self.db.execute(
@@ -480,6 +506,7 @@ class Store:
         return str(row[0]) if row else None
 
     def set_auto_delete(self, owner_user_id: int, enabled: bool) -> None:
+        self._protection_setting(int(owner_user_id), "auto_delete_harmful", enabled)
         self.db.execute(
             "INSERT INTO user_settings(owner_user_id, auto_delete_harmful) VALUES(?,?) "
             "ON CONFLICT(owner_user_id) DO UPDATE SET auto_delete_harmful=excluded.auto_delete_harmful",
@@ -488,13 +515,10 @@ class Store:
         self.db.commit()
 
     def outgoing_warning_enabled(self, owner_user_id: int) -> bool:
-        row = self.db.execute(
-            "SELECT outgoing_warning FROM user_settings WHERE owner_user_id=?",
-            (int(owner_user_id),),
-        ).fetchone()
-        return bool(row[0]) if row else False
+        return self._protection_setting(int(owner_user_id), "outgoing_warning")
 
     def set_outgoing_warning(self, owner_user_id: int, enabled: bool) -> None:
+        self._protection_setting(int(owner_user_id), "outgoing_warning", enabled)
         self.db.execute(
             "INSERT INTO user_settings(owner_user_id, outgoing_warning) VALUES(?,?) "
             "ON CONFLICT(owner_user_id) DO UPDATE SET outgoing_warning=excluded.outgoing_warning",
@@ -2357,6 +2381,7 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Bot to‘xtatildi")
+
 
 
 
