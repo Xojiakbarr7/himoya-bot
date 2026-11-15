@@ -171,7 +171,7 @@ def history_media(message: dict[str, Any]) -> dict[str, str] | None:
 class TemporaryMessageHistory:
     """Opt-in bounded snapshots. PostgreSQL backend is configured separately."""
 
-    def __init__(self, ttl: float = 259200, per_owner: int = 1000, total: int = 20000) -> None:
+    def __init__(self, ttl: float = 86400, per_owner: int = 1000, total: int = 20000) -> None:
         self.ttl, self.per_owner, self.total = ttl, per_owner, total
         self.items: OrderedDict[tuple[str, int, int], dict[str, Any]] = OrderedDict()
 
@@ -228,7 +228,7 @@ class TemporaryMessageHistory:
 
 
 class PostgresMessageHistory:
-    """Durable, owner-scoped 72-hour history; all SQL values are bound parameters."""
+    """Durable, owner-scoped 24-hour history; all SQL values are bound parameters."""
 
     def __init__(self, url: str) -> None:
         import psycopg
@@ -241,6 +241,8 @@ class PostgresMessageHistory:
             ("CREATE INDEX IF NOT EXISTS qalqon_security_events_owner_age ON qalqon_security_events(owner,created_at)", ()),
         ])
         self.prune()
+        # Apply the shorter retention window to existing records as well.
+        self._execute([("UPDATE qalqon_history SET expires=%s WHERE expires>%s", (time.time() + 86400, time.time() + 86400))])
 
     def _execute(self, statements):
         try:
@@ -300,7 +302,7 @@ class PostgresMessageHistory:
         if old:
             previous = json.loads(old[0][0])
             item.update(token=previous["token"], deleted=previous["deleted"])
-        item["expires"] = time.time() + 259200
+        item["expires"] = time.time() + 86400
         self._execute([
             ("INSERT INTO qalqon_history(connection,chat,message,owner,expires,payload) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(connection,chat,message) DO UPDATE SET owner=excluded.owner,expires=excluded.expires,payload=excluded.payload", (*key, owner, item["expires"], json.dumps(item))),
             ("DELETE FROM qalqon_history WHERE expires<=%s", (time.time(),)),
@@ -319,7 +321,7 @@ class PostgresMessageHistory:
                 missing += 1
             elif not item["ignored"] and not item["deleted"]:
                 item["deleted"] = True
-                item["expires"] = time.time() + 259200
+                item["expires"] = time.time() + 86400
                 found += 1
                 writes.append(("UPDATE qalqon_history SET payload=%s,expires=%s WHERE owner=%s AND connection=%s AND chat=%s AND message=%s", (json.dumps(item), item["expires"], owner, connection, chat_id, message_id)))
         if writes:
@@ -878,7 +880,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>barcha xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
             "3. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
             "🔬 <b>APK tekshirish · 100 MB</b> tugmasi orqali katta APK’ni tanlab, ruxsatlari va SHA-256 xeshini tekshirtiring. 20 MB gacha faylni botga bevosita yuborish ham mumkin. Havola domenlari Phishing.Database ro‘yxati bilan solishtiriladi.\n\n"
-            "⚠️ Bot to‘liq antivirus emas. Avtomatik kuzatuv fayllarni yuklab olmaydi; chuqur APK tekshiruvi faqat roziligingiz bilan bajariladi. Tarix rejimi yoqilsa matn va media identifikatori 3 kungacha saqlanadi."
+            "⚠️ Bot to‘liq antivirus emas. Avtomatik kuzatuv fayllarni yuklab olmaydi; chuqur APK tekshiruvi faqat roziligingiz bilan bajariladi. Tarix rejimi yoqilsa matn va media identifikatori 1 kungacha saqlanadi."
         ),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
@@ -903,7 +905,7 @@ async def send_history_menu(session: aiohttp.ClientSession, store: Store, owner:
     await send_text(session, owner,
         f"📝 <b>O‘chirilgan xabarlar: {status}</b>\n\n"
         "Yoqsangiz, bot yangi kiruvchi xabarlarning matni va oddiy media identifikatorini "
-        "72 soatgacha (3 kun), oxirgi 1000 ta xabar doirasida saqlaydi. O‘chirilishi aniqlansa yana 3 kun saqlaydi. "
+        "24 soatgacha (1 kun), oxirgi 1000 ta xabar doirasida saqlaydi. O‘chirilishi aniqlansa yana 24 soat saqlaydi. "
         "Rasm, video, ovoz, audio, hujjat, GIF va stiker qo‘llanadi. Fayl yuklab olinmaydi. "
         "Bir martalik va himoyalangan media saqlanmaydi.\n\n"
         + ("✅ Tashqi baza ulangan: tarix server restartidan keyin ham qoladi.\n\n" if isinstance(DELETED_HISTORY, PostgresMessageHistory) else
@@ -1052,7 +1054,7 @@ async def handle_history_callback(session: aiohttp.ClientSession, store: Store, 
             await send_text(session, owner, "Avval botni Telegram Business orqali shu akkauntingizga ulang.")
             return
         store.set_history(owner, True)
-        await send_text(session, owner, "✅ Rejim yoqildi: matn va oddiy media 72 soatgacha, oxirgi 1000 ta xabar doirasida. Saqlash holati rejim menyusida ko‘rsatilgan.")
+        await send_text(session, owner, "✅ Rejim yoqildi: matn va oddiy media 24 soatgacha, oxirgi 1000 ta xabar doirasida. Saqlash holati rejim menyusida ko‘rsatilgan.")
     elif data in {"history:off", "history:clear"}:
         if data == "history:off":
             store.set_history(owner, False)
@@ -1120,7 +1122,8 @@ async def handle_business_deletions(session: aiohttp.ClientSession, store: Store
         return
     text = f"🗑 Suhbatda xabarlar o‘chirildi.\n\nBot oldindan eslab qolgan: {found} ta."
     if missing:
-        text += f"\nMatni xotirada yo‘q: {missing} ta."
+        text += f"\nNusxasi topilmadi: {missing} ta."
+        text += "\nBu xabar botga ulanishingizdan yoki tarix yoqilishidan oldin yuborilgan, siz yuborgan, muddati tugagan yoxud saqlash limitidan chiqqan bo‘lishi mumkin. Bu xotira to‘ldi degani emas."
     text += "\n\nKim o‘chirganini Telegram bildirmaydi."
     await api(session, "sendMessage", {
         "chat_id": owner_chat, "text": text,
@@ -2381,6 +2384,7 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Bot to‘xtatildi")
+
 
 
 
