@@ -113,3 +113,14 @@ Avto o‘chirish uchun Telegram Business’dagi `can_delete_all_messages`, yubor
 Webhook autentifikatsiyasi, kiruvchi ma’lumot tekshiruvi, takrorlarni bloklash, shaxsiy spam cheklovi va maxfiy log formati qo‘shilgan. To‘liq amaliy ko‘rsatma va hosting cheklovlari: [SECURITY.md](SECURITY.md).
 
 Sinov: `python -m unittest -v test_security`.
+
+
+## ClamAV antivirus integration
+
+APK uploads (Telegram and 100 MB upload form) now stream to a local clamd Unix socket when CLAMAV_SOCKET is configured. Existing permission analysis and VirusTotal hash lookup remain independent. This does not scan a phone, execute malware, disinfect files, or guarantee safety. Without the engine configured, the report explicitly states that no antivirus scan ran.
+
+Deployment prerequisite: Linux server with at least 3 GiB RAM (prefer 4 GiB), at least 5 GiB free disk in addition to OS, current ClamAV and freshclam signatures. The existing free Render Python service has NOT been converted into a ClamAV server. Do not enable a paid service without owner authorization.
+
+Install clamav and clamav-daemon from the OS package manager. Run freshclam updates and clamd on a local Unix socket, e.g. /run/clamav/clamd.ctl. Give the bot OS user socket access. Configure StreamMaxLength 110M, MaxFileSize 100M, MaxScanSize 200M, MaxRecursion 10, MaxFiles 1000, AlertExceedsMax yes, MaxThreads 1, and ReadTimeout 120 in clamd.conf. Do not expose clamd TCP ports publicly. Set CLAMAV_SOCKET to the socket path in the bot environment and restart the bot. Keep freshclam running for signature updates. Bot rejects a clean verdict if database version date cannot be checked or is older than 7 days; supervise database updates and alert on failures.
+
+Acceptance check after deployment: use the harmless official EICAR antivirus test file under controlled conditions, confirm detection, then confirm a benign APK and an oversized/incomplete archive receive distinct results. Protocol unit tests alone do not establish live detection. Before enabling production scanning, test database age, timeouts, memory use, archive limits and concurrent bot responsiveness.
