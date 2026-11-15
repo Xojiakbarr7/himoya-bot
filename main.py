@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
+import struct
 from collections import Counter, OrderedDict, deque
 import html
 import ipaddress
@@ -1542,6 +1544,67 @@ async def offer_apk_inspection(session: aiohttp.ClientSession, message: dict[str
     })
 
 
+
+async def scan_antivirus(source) -> dict[str, str]:
+    """Scan without executing/extracting the sample; only a local clamd socket is used."""
+    socket_path = os.environ.get("CLAMAV_SOCKET", "").strip()
+    if not socket_path:
+        return {"status": "disabled", "detail": "Antivirus dvigateli ulanmagan; fayl antivirusda tekshirilmadi."}
+    writer = None
+    original = source.tell()
+    try:
+        async with asyncio.timeout(120):
+            reader, writer = await asyncio.open_unix_connection(socket_path, limit=8192)
+            # Check database age before trusting a clean verdict.
+            writer.write(b"zVERSION\0")
+            await writer.drain()
+            version = (await reader.readuntil(b"\0")).decode("utf-8", "replace").rstrip("\0")
+            writer.close()
+            await writer.wait_closed()
+            writer = None
+            try:
+                from datetime import datetime
+                stamp = version.split("/", 2)[2].strip()
+                updated = datetime.strptime(stamp, "%a %b %d %H:%M:%S %Y").timestamp()
+                if not -86400 < time.time() - updated < 7 * 86400:
+                    return {"status": "stale", "detail": "Antivirus bazasi eskirgan yoki sanasi noto‘g‘ri. To‘liq tekshiruv tasdiqlanmadi."}
+            except (IndexError, ValueError, OverflowError):
+                return {"status": "unavailable", "detail": "Antivirus bazasining yangiligini tekshirib bo‘lmadi."}
+            reader, writer = await asyncio.open_unix_connection(socket_path, limit=8192)
+            writer.write(b"zINSTREAM\0")
+            source.seek(0)
+            total = 0
+            while True:
+                chunk = await asyncio.to_thread(source.read, 65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    return {"status": "limit", "detail": "Fayl antivirus tekshiruv hajmi limitidan katta."}
+                writer.write(struct.pack("!I", len(chunk)) + chunk)
+                await writer.drain()
+            writer.write(struct.pack("!I", 0))
+            await writer.drain()
+            result = (await reader.readuntil(b"\0")).decode("utf-8", "replace").rstrip("\0")
+            if result == "stream: OK":
+                return {"status": "clean", "detail": "ClamAV tekshiruvida ma’lum zararli belgi topilmadi. Bu xavfsizlik kafolati emas."}
+            if result.startswith("stream: ") and result.endswith(" FOUND"):
+                signature = result[len("stream: "):-len(" FOUND")][:250]
+                if signature.startswith("Heuristics.Limits.Exceeded"):
+                    return {"status": "limit", "detail": "Arxiv yoki faylni to‘liq tekshirish limiti oshdi; natija to‘liq emas."}
+                return {"status": "infected", "detail": "Xavf aniqlandi: " + signature + ". Faylni o‘rnatmang yoki ochmang."}
+            return {"status": "unavailable", "detail": "Antivirus tekshiruvni yakunlay olmadi. Fayl xavfsiz deb hisoblanmaydi."}
+    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+        return {"status": "unavailable", "detail": "Antivirus xizmati javob bermadi; tekshiruv tugamadi."}
+    finally:
+        source.seek(original)
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+
 async def run_apk_inspection(session: aiohttp.ClientSession, owner: int, request: dict[str, Any]) -> None:
     try:
         async with APK_SCAN_SEMAPHORE:
@@ -1566,8 +1629,9 @@ async def run_apk_inspection(session: aiohttp.ClientSession, owner: int, request
                     if len(data) > MAX_APK_BYTES:
                         raise ValueError("Fayl hajmi 20 MB dan katta")
             report = await asyncio.to_thread(inspect_apk, bytes(data))
+            antivirus = await scan_antivirus(io.BytesIO(data))
             data.clear()
-            await send_apk_report(session, owner, request["name"], report)
+            await send_apk_report(session, owner, request["name"], report, antivirus)
     except (aiohttp.ClientError, asyncio.TimeoutError, TelegramAPIError, ValueError, OSError) as exc:
         # Network exception text may contain a token-bearing Telegram URL.
         log.warning("APK inspection could not finish (%s)", type(exc).__name__)
@@ -1601,7 +1665,8 @@ async def run_uploaded_apk_inspection(session: aiohttp.ClientSession, owner: int
             except asyncio.CancelledError:
                 await worker
                 raise
-            await send_apk_report(session, owner, name, report)
+            antivirus = await scan_antivirus(source)
+            await send_apk_report(session, owner, name, report, antivirus)
     except (ValueError, OSError, TelegramAPIError) as exc:
         log.warning("Uploaded APK inspection failed (%s)", type(exc).__name__)
         try:
@@ -1610,9 +1675,12 @@ async def run_uploaded_apk_inspection(session: aiohttp.ClientSession, owner: int
             pass
 
 
-async def send_apk_report(session: aiohttp.ClientSession, owner: int, name: str, report: dict[str, Any]) -> None:
+async def send_apk_report(session: aiohttp.ClientSession, owner: int, name: str, report: dict[str, Any], antivirus: dict[str, str] | None = None) -> None:
     reputation = await HASH_REPUTATION.lookup(session, report["sha256"])
-    lines = ["🔬 <b>APK tekshiruvi</b>", html.escape(name), ""]
+    antivirus = antivirus or {"status": "disabled", "detail": "Antivirus dvigateli ulanmagan; fayl antivirusda tekshirilmadi."}
+    badge = "🚨" if antivirus["status"] == "infected" else "🔬"
+    lines = [f"{badge} <b>APK xavfsizlik tekshiruvi</b>", html.escape(name), "",
+             "<b>Antivirus dvigateli:</b>", html.escape(antivirus["detail"]), ""]
     if report["manifest_read"]:
         lines.append("<b>Kuchli ruxsatlar:</b>")
         lines.extend("• " + RISK_PERMISSIONS[p] for p in report["permissions"])
@@ -2384,6 +2452,7 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Bot to‘xtatildi")
+
 
 
 
