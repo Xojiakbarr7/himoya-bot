@@ -28,7 +28,6 @@ from urllib.parse import urlsplit
 import aiohttp
 from aiohttp import web
 from threat_intel import DomainReputation, HashReputation, MAX_APK_BYTES, MAX_UPLOAD_BYTES, RISK_PERMISSIONS, inspect_apk, inspect_apk_file
-from apk_upload import ApkUploadService
 from subscription import SubscriptionGate
 
 
@@ -55,7 +54,6 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 DB_PATH = Path(os.environ.get("DATABASE_PATH", str(DATA_DIR / "himoya.sqlite3")))
 THREAT_INTEL = DomainReputation(DATA_DIR / "phishing_domains.txt")
 HASH_REPUTATION = HashReputation(os.environ.get("VIRUSTOTAL_API_KEY", ""))
-APK_UPLOAD_SERVICE = ApkUploadService(os.environ.get("RENDER_EXTERNAL_URL", ""))
 SUBSCRIPTION_GATE = SubscriptionGate(os.environ.get("REQUIRED_CHANNEL", "@qalqon_ai1").strip())
 REQUIRED_CHANNEL_URL = os.environ.get("REQUIRED_CHANNEL_URL", "https://t.me/qalqon_ai1").strip()
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -75,10 +73,10 @@ BUTTON_SECURITY_CENTER = "🛡 Xavfsizlik markazi"
 BUTTON_APK_UPLOAD = "🔬 APK · 100 MB"
 MAIN_KEYBOARD = {
     "keyboard": [
-        [BUTTON_SCAN, BUTTON_APK_UPLOAD],
+        [BUTTON_SCAN, BUTTON_STATUS],
         [BUTTON_HISTORY, BUTTON_SECURITY_CENTER],
         [BUTTON_DELETE_MODE, BUTTON_OUTGOING_WARNING],
-        [BUTTON_STATUS, BUTTON_TIPS],
+        [BUTTON_TIPS],
         [BUTTON_HELP, "✖️ Menyuni yopish"],
     ],
     "resize_keyboard": True,
@@ -1463,10 +1461,9 @@ async def handle_keyboard_button(
         await send_text(session, chat_id,
             "🔎 <b>Qo‘lda tekshirish</b>\n\n"
             "Shubhali xabarni shu botga forward qiling yoki havola, xabar matni yoxud APK faylini yuboring.\n\n"
-            "Havola domeni xavf bazasi va mahalliy belgilar bilan tekshiriladi; sayt ochilmaydi. 20 MB gacha APK’ni botga yuboring. Kattaroq fayl uchun pastdagi 🔬 APK · 100 MB tugmasini bosing.")
+            "Havola domeni xavf bazasi va mahalliy belgilar bilan tekshiriladi; sayt ochilmaydi. 20 MB gacha APK’ni botga yuboring.")
     elif text == BUTTON_APK_UPLOAD:
-        if not await offer_large_apk_upload(session, chat_id):
-            await send_text(session, chat_id, "Tekshiruv sahifasi hali sozlanmagan. 20 MB gacha APK’ni shu botga yuboring.")
+        await send_text(session, chat_id, "100 MB yuklash bo‘limi olib tashlandi. 20 MB gacha APK faylini bevosita botga yuboring.")
     elif text == BUTTON_DELETE_MODE:
         await send_delete_mode_menu(session, store, chat_id)
     elif text == BUTTON_OUTGOING_WARNING:
@@ -1522,12 +1519,8 @@ async def offer_apk_inspection(session: aiohttp.ClientSession, message: dict[str
     if not isinstance(file_id, str) or not 0 < len(file_id) <= 512:
         return
     size = document.get("file_size", 0)
-    if type(size) is not int or size < 0 or size > MAX_UPLOAD_BYTES:
-        await send_text(session, owner, "🔬 Tekshiruv uchun APK hajmi 100 MB dan oshmasligi kerak.")
-        return
-    if size > MAX_APK_BYTES:
-        if not await offer_large_apk_upload(session, owner, str(document.get("file_name") or "yuklangan.apk")):
-            await send_text(session, owner, "20 MB dan katta fayl uchun tekshiruv sahifasi sozlanishi kerak.")
+    if type(size) is not int or size < 0 or size > MAX_APK_BYTES:
+        await send_text(session, owner, "🔬 Tekshirish uchun 20 MB gacha APK faylini yuboring.")
         return
     now = time.monotonic()
     for token in [token for token, item in APK_REQUESTS.items() if item["expires"] <= now or item["owner"] == owner]:
@@ -1637,40 +1630,6 @@ async def run_apk_inspection(session: aiohttp.ClientSession, owner: int, request
         log.warning("APK inspection could not finish (%s)", type(exc).__name__)
         try:
             await send_text(session, owner, "⚠️ APK tekshiruvini tugatib bo‘lmadi. Fayl 20 MB dan kichik bo‘lsin; uni botga qayta yuborib urinib ko‘ring.")
-        except TelegramAPIError:
-            pass
-
-
-async def offer_large_apk_upload(session: aiohttp.ClientSession, owner: int, name: str = "yuklangan.apk") -> bool:
-    origin = APK_UPLOAD_SERVICE.origin
-    parsed = urlsplit(origin)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
-        return False
-    token = APK_UPLOAD_SERVICE.issue(owner, name)
-    await api(session, "sendMessage", {
-        "chat_id": owner,
-        "text": "🔬 <b>100 MB gacha APK tekshirish</b>\n\nTugmani bosing, telefoningiz yoki kompyuteringizdan APK faylini tanlang va tekshirishga rozilik bering. Natija shu bot chatiga keladi.\n\nFayl vaqtinchalik server fayliga olinib, tekshiruvdan keyin o‘chiriladi. Fayl ishga tushirilmaydi. Havola faqat sizning natijangiz uchun, 15 daqiqa va bir marta amal qiladi.",
-        "parse_mode": "HTML",
-        "reply_markup": {"inline_keyboard": [[{"text": "📤 100 MB gacha APK yuklash", "web_app": {"url": f"{origin}/apk-upload/{token}"}}]]},
-    })
-    return True
-
-
-async def run_uploaded_apk_inspection(session: aiohttp.ClientSession, owner: int, name: str, source) -> None:
-    try:
-        async with APK_SCAN_SEMAPHORE:
-            worker = asyncio.create_task(asyncio.to_thread(inspect_apk_file, source))
-            try:
-                report = await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                await worker
-                raise
-            antivirus = await scan_antivirus(source)
-            await send_apk_report(session, owner, name, report, antivirus)
-    except (ValueError, OSError, TelegramAPIError) as exc:
-        log.warning("Uploaded APK inspection failed (%s)", type(exc).__name__)
-        try:
-            await send_text(session, owner, "⚠️ Yuklangan APK’ni tekshirib bo‘lmadi. Botdan yangi havola olib qayta urinib ko‘ring.")
         except TelegramAPIError:
             pass
 
@@ -2351,13 +2310,6 @@ def create_webhook_app(
     app.router.add_get("/", health)
     app.router.add_get("/healthz", health)
     app.router.add_post(WEBHOOK_PATH, webhook)
-    APK_UPLOAD_SERVICE.register(
-        app,
-        lambda owner, name, source: run_uploaded_apk_inspection(session, owner, name, source),
-        APK_SCAN_JOBS,
-        lambda owner: APK_SCAN_LIMITER.allow(("apk", owner)),
-        access_owner=lambda owner: subscription_upload_allowed(session, owner),
-    )
     return app
 
 
@@ -2452,6 +2404,7 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Bot to‘xtatildi")
+
 
 
 
