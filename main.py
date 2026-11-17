@@ -1252,8 +1252,11 @@ async def handle_status(session: aiohttp.ClientSession, chat_id: int) -> None:
         except TelegramTemporaryError:
             lines.extend(["", "👥 Foydalanuvchilar statistikasi bazada vaqtincha mavjud emas."])
         last_error = str(info.get("last_error_message") or "").strip()
-        if last_error:
-            lines.append("⚠️ Telegram webhook yetkazishda xato qayd etgan. Server holatini tekshirish kerak.")
+        last_error_date = int(info.get("last_error_date") or 0)
+        # Telegram retains historical errors after delivery recovers. The status
+        # request itself can still be pending while this response is generated.
+        if last_error and pending > 1 and 0 <= time.time() - last_error_date < 300:
+            lines.append("⚠️ Xabarlarni qabul qilishda vaqtinchalik kechikish bor. Telegram qayta yuboradi.")
         await send_text(session, chat_id, "\n".join(lines))
     except TelegramAPIError as exc:
         if isinstance(exc, TelegramTemporaryError):
