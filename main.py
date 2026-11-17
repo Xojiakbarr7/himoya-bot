@@ -1881,7 +1881,17 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         sender = message.get("from") or {}
         if chat_type == "private" and sender.get("id"):
             DELETED_HISTORY.record_bot_user(int(sender["id"]), started=text.split(maxsplit=1)[0].split("@", 1)[0] == "/start")
-        if text.startswith("/"):
+        command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        menu_commands = {
+            "/scan": BUTTON_SCAN, "/history": BUTTON_HISTORY,
+            "/security": BUTTON_SECURITY_CENTER, "/autodelete": BUTTON_DELETE_MODE,
+            "/warning": BUTTON_OUTGOING_WARNING, "/guide": BUTTON_HELP,
+        }
+        if command == "/menu":
+            await api(session, "sendMessage", {"chat_id": int(message["chat"]["id"]), "text": "Kerakli bo‘limni tanlang:", "reply_markup": MAIN_KEYBOARD})
+        elif command in menu_commands:
+            await handle_keyboard_button(session, store, dict(message, text=menu_commands[command]))
+        elif text.startswith("/"):
             await handle_command(session, message)
         else:
             handled = await handle_keyboard_button(session, store, message)
@@ -2404,13 +2414,24 @@ async def run() -> None:
             ready = await SUBSCRIPTION_GATE.admin_ready(lambda method, payload: api(session, method, payload), force=True)
             log.info("Required channel subscription: %s; admin verification %s", SUBSCRIPTION_GATE.channel, "ready" if ready else "unavailable (add bot as channel administrator)")
         try:
-            await api(session, "deleteMyCommands")
+            await api(session, "setMyCommands", {"commands": [
+                {"command": "start", "description": "Botni boshlash"},
+                {"command": "menu", "description": "Tugmalar menyusini ochish"},
+                {"command": "scan", "description": "Xabar yoki APK tekshirish"},
+                {"command": "status", "description": "Bot holati va foydalanuvchilar"},
+                {"command": "history", "description": "O‘chirilgan xabarlar"},
+                {"command": "security", "description": "Xavfsizlik markazi"},
+                {"command": "autodelete", "description": "Avto o‘chirish sozlamasi"},
+                {"command": "warning", "description": "Chiquvchi ogohlantirish"},
+                {"command": "guide", "description": "Video qo‘llanma"},
+                {"command": "tips", "description": "Xavfsizlik maslahatlari"},
+            ]})
         except TelegramAPIError as exc:
             if isinstance(exc, TelegramTemporaryError):
                 raise
-            log.warning("Bot menyusidagi eski buyruqlarni tozalash imkoni bo‘lmadi: %s", exc)
+            log.warning("Bot buyruqlar menyusini o‘rnatish imkoni bo‘lmadi: %s", exc)
         try:
-            await api(session, "setChatMenuButton", {"menu_button": {"type": "default"}})
+            await api(session, "setChatMenuButton", {"menu_button": {"type": "commands"}})
         except TelegramAPIError:
             log.warning("Bot menyusini tiklash vaqtincha bajarilmadi")
         reputation_task = asyncio.create_task(THREAT_INTEL.run(session))
