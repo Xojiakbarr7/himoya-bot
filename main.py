@@ -226,6 +226,12 @@ class TemporaryMessageHistory:
     def detail(self, owner: int, token: str) -> dict[str, Any] | None:
         return next((item for item in self.deleted(owner) if item["token"] == token), None)
 
+    def record_bot_user(self, user_id: int, started: bool = False, business: bool = False) -> None:
+        return None
+
+    def bot_user_counts(self) -> tuple[int, int]:
+        return (0, 0)
+
 
 class PostgresMessageHistory:
     """Durable, owner-scoped 24-hour history; all SQL values are bound parameters."""
@@ -239,6 +245,7 @@ class PostgresMessageHistory:
             ("CREATE TABLE IF NOT EXISTS qalqon_history_settings (owner BIGINT PRIMARY KEY, enabled INTEGER NOT NULL)", ()),
             ("CREATE TABLE IF NOT EXISTS qalqon_security_events (id BIGSERIAL PRIMARY KEY, owner BIGINT NOT NULL, connection TEXT NOT NULL, chat BIGINT NOT NULL, chat_label TEXT NOT NULL, category TEXT NOT NULL, action TEXT NOT NULL, score INTEGER NOT NULL, created_at DOUBLE PRECISION NOT NULL)", ()),
             ("CREATE INDEX IF NOT EXISTS qalqon_security_events_owner_age ON qalqon_security_events(owner,created_at)", ()),
+            ("CREATE TABLE IF NOT EXISTS qalqon_bot_users (user_id BIGINT PRIMARY KEY, started INTEGER NOT NULL DEFAULT 0, business INTEGER NOT NULL DEFAULT 0)", ()),
         ])
         self.prune()
         # Apply the shorter retention window to existing records as well.
@@ -275,6 +282,13 @@ class PostgresMessageHistory:
             log.error("History database failure: category=%s sqlstate=%s", reason, state)
             # Never leak credentials, SQL parameters or message bodies to logs.
             raise TelegramTemporaryError("Tarix bazasi vaqtincha mavjud emas") from None
+
+    def record_bot_user(self, user_id: int, started: bool = False, business: bool = False) -> None:
+        self._execute([("INSERT INTO qalqon_bot_users(user_id,started,business) VALUES(%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET started=GREATEST(qalqon_bot_users.started,excluded.started), business=GREATEST(qalqon_bot_users.business,excluded.business)", (int(user_id), int(started), int(business)))])
+
+    def bot_user_counts(self) -> tuple[int, int]:
+        rows=self._execute([("SELECT COUNT(*) FILTER (WHERE started=1), COUNT(*) FILTER (WHERE business=1) FROM qalqon_bot_users", ())])
+        return (int(rows[0][0]), int(rows[0][1])) if rows else (0,0)
 
     def prune(self):
         now = time.time()
@@ -1232,6 +1246,11 @@ async def handle_status(session: aiohttp.ClientSession, chat_id: int) -> None:
             mode = "Webhook yo‘q (lokal polling rejimi bo‘lishi mumkin)"
         lines = ["🛡 <b>Qalqon AI holati</b>", f"Server: ✅ ishlayapti", f"Qabul qilish: {mode}"]
         lines.append(f"Navbatdagi yangilanishlar: {pending}")
+        try:
+            started, business = DELETED_HISTORY.bot_user_counts()
+            lines.extend(["", f"👥 /start bosganlar: {started}", f"🔗 Business akkauntlar: {business}"])
+        except TelegramTemporaryError:
+            lines.extend(["", "👥 Foydalanuvchilar statistikasi bazada vaqtincha mavjud emas."])
         last_error = str(info.get("last_error_message") or "").strip()
         if last_error:
             lines.append("⚠️ Telegram webhook yetkazishda xato qayd etgan. Server holatini tekshirish kerak.")
@@ -1856,6 +1875,9 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         if chat_type == "private" and await accept_video_guide(session, store, message):
             return
         text = str(message.get("text") or "")
+        sender = message.get("from") or {}
+        if chat_type == "private" and sender.get("id"):
+            DELETED_HISTORY.record_bot_user(int(sender["id"]), started=text.split(maxsplit=1)[0].split("@", 1)[0] == "/start")
         if text.startswith("/"):
             await handle_command(session, message)
         else:
@@ -1870,6 +1892,9 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         if not isinstance(info, dict) or info.get("id") != connection_id:
             raise TelegramAPIError("Business ulanishini tasdiqlab bo‘lmadi")
         store.save_connection(info)
+        business_user_id = int((info.get("user") or {}).get("id", 0))
+        if business_user_id:
+            DELETED_HISTORY.record_bot_user(business_user_id, business=bool(info.get("is_enabled")))
         if not info.get("is_enabled"):
             DELETED_HISTORY.clear(int((info.get("user") or {}).get("id", 0)))
         log.info("Business ulanish holati yangilandi")
@@ -2404,6 +2429,7 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Bot to‘xtatildi")
+
 
 
 
