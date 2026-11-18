@@ -8,6 +8,7 @@ temporary upload file with explicit consent. Opt-in history stores text and medi
 from __future__ import annotations
 
 import asyncio
+import hmac
 import hashlib
 import io
 import struct
@@ -23,7 +24,7 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -893,7 +894,6 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
             "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>barcha xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
             "3. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
-            "🔬 <b>APK tekshirish · 100 MB</b> tugmasi orqali katta APK’ni tanlab, ruxsatlari va SHA-256 xeshini tekshirtiring. 20 MB gacha faylni botga bevosita yuborish ham mumkin. Havola domenlari Phishing.Database ro‘yxati bilan solishtiriladi.\n\n"
             "⚠️ Bot to‘liq antivirus emas. Avtomatik kuzatuv fayllarni yuklab olmaydi; chuqur APK tekshiruvi faqat roziligingiz bilan bajariladi. Tarix rejimi yoqilsa matn va media identifikatori 1 kungacha saqlanadi."
         ),
         "parse_mode": "HTML",
@@ -2275,6 +2275,69 @@ async def run_polling(session: aiohttp.ClientSession, store: Store) -> None:
             await asyncio.sleep(3)
 
 
+def miniapp_owner(raw: str) -> int:
+    if not BOT_TOKEN or not isinstance(raw, str) or len(raw) > 16000:
+        raise ValueError
+    pairs = parse_qsl(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=30)
+    fields = dict(pairs)
+    signature = fields.pop("hash", "")
+    if not re.fullmatch("[a-f0-9]{64}", signature) or len(fields) + 1 != len(pairs):
+        raise ValueError
+    key = hmac.digest(b"WebAppData", BOT_TOKEN.encode(), "sha256")
+    check = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
+    if not hmac.compare_digest(hmac.new(key, check.encode(), hashlib.sha256).hexdigest(), signature):
+        raise ValueError
+    if not -30 <= time.time() - int(fields["auth_date"]) <= 3600:
+        raise ValueError
+    owner = json.loads(fields["user"])["id"]
+    if type(owner) is not int or owner <= 0:
+        raise ValueError
+    return owner
+
+
+def register_miniapp(app, session, store):
+    async def page(request):
+        return web.FileResponse(Path(__file__).with_name("miniapp.html"), headers={
+            "Content-Type": "text/html; charset=utf-8",
+            "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline' https://telegram.org; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'none'; form-action 'none'",
+        })
+
+    async def endpoint(request):
+        try:
+            owner = miniapp_owner(request.headers.get("X-Telegram-Init-Data", ""))
+        except (KeyError, TypeError, ValueError):
+            return web.json_response({"error": "Ilovani Telegram botidan qayta oching."}, status=401)
+        if not PRIVATE_LIMITER.allow(("miniapp", owner)):
+            return web.json_response({"error": "Bir oz kutib qayta urining."}, status=429)
+        if await subscription_state(session, owner) != "member":
+            return web.json_response({"error": "Botdagi kanal obunasini tasdiqlang."}, status=403)
+        readers = {"auto": store.auto_delete_enabled, "warning": store.outgoing_warning_enabled, "history": store.history_enabled}
+        setters = {"auto": store.set_auto_delete, "warning": store.set_outgoing_warning, "history": store.set_history}
+        try:
+            if request.method == "PUT":
+                body = await request.json()
+                if not isinstance(body, dict) or body.get("key") not in tuple(setters) or type(body.get("enabled")) is not bool:
+                    raise ValueError
+                key, enabled = body["key"], body["enabled"]
+                setters[key](owner, enabled)
+                if key == "history" and not enabled:
+                    DELETED_HISTORY.clear(owner)
+            if request.path.endswith("/history"):
+                rows = DELETED_HISTORY.deleted(owner) if store.history_enabled(owner) else []
+                return web.json_response({"messages": [{"chat": str(row["chat_id"]), "name": row["sender"], "text": row["text"]} for row in rows]})
+            return web.json_response({"connected": bool(store.active_connection_id(owner)),
+                                      "settings": {key: reader(owner) for key, reader in readers.items()}})
+        except (TypeError, ValueError):
+            return web.json_response({"error": "So‘rov noto‘g‘ri."}, status=400)
+        except (sqlite3.Error, TelegramAPIError):
+            return web.json_response({"error": "Ma’lumotlar vaqtincha mavjud emas."}, status=503)
+
+    app.router.add_get("/miniapp", page)
+    app.router.add_get("/miniapp/state", endpoint)
+    app.router.add_put("/miniapp/state", endpoint)
+    app.router.add_get("/miniapp/history", endpoint)
+
+
 def create_webhook_app(
     session: aiohttp.ClientSession, store: Store, secret: str,
 ) -> web.Application:
@@ -2347,6 +2410,7 @@ def create_webhook_app(
     app.on_response_prepare.append(secure_response)
     app.router.add_get("/", health)
     app.router.add_get("/healthz", health)
+    register_miniapp(app, session, store)
     app.router.add_post(WEBHOOK_PATH, webhook)
     return app
 
@@ -2357,6 +2421,7 @@ async def run_webhook(session: aiohttp.ClientSession, store: Store) -> None:
     parsed = urlsplit(external_url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
         raise SystemExit("Webhook uchun RENDER_EXTERNAL_URL to‘g‘ri HTTPS manzil bo‘lishi kerak")
+    MENU_LAUNCHER["inline_keyboard"].insert(0, [{"text": "🛡 Ilovani ochish", "web_app": {"url": external_url + "/miniapp"}}])
     app = create_webhook_app(session, store, secret)
     runner = web.AppRunner(
         app, access_log=None, auto_decompress=False, keepalive_timeout=15,
