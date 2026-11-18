@@ -165,7 +165,17 @@ def history_media(message: dict[str, Any]) -> dict[str, str] | None:
             continue
         file_id = value.get("file_id")
         if isinstance(file_id, str) and 0 < len(file_id) <= 512:
-            return {"kind": kind, "file_id": file_id}
+            media = {"kind": kind, "file_id": file_id}
+            if kind == "sticker":
+                thumb = (value.get("thumbnail") or {}).get("file_id")
+                if isinstance(thumb, str):
+                    media["preview"] = thumb
+                media["emoji"] = value.get("emoji") or "🖼️"
+            elif kind == "photo":
+                sizes = [photo for photo in message["photo"] if photo.get("file_id") and photo.get("width", 0) <= 960]
+                if sizes:
+                    media["preview"] = sizes[-1]["file_id"]
+            return media
     return None
 
 
@@ -195,6 +205,7 @@ class TemporaryMessageHistory:
         media = history_media(message) if not ignored else None
         text = message.get("text") or message.get("caption") or ("[" + media["kind"] + "]" if media else "[Bu turdagi xabar saqlanmaydi]")
         self.items[key] = {
+            "sent_at": message.get("date"), "deleted_at": (previous or {}).get("deleted_at"),
             "owner": owner, "sender": name[:128], "text": "" if ignored else str(text)[:4096],
             "expires": time.monotonic() + self.ttl, "deleted": previous["deleted"] if previous else False, "ignored": ignored, "media": media,
             "token": previous["token"] if previous else secrets.token_urlsafe(12),
@@ -205,7 +216,7 @@ class TemporaryMessageHistory:
         while len(self.items) > self.total:
             self.items.popitem(last=False)
 
-    def mark_deleted(self, owner: int, connection: str, chat_id: int, message_ids: list[int]) -> tuple[int, int]:
+    def mark_deleted(self, owner: int, connection: str, chat_id: int, message_ids: list[int], automatic=False) -> tuple[int, int]:
         self.prune()
         found = missing = 0
         for message_id in set(message_ids):
@@ -213,7 +224,9 @@ class TemporaryMessageHistory:
             if item is None or item["owner"] != owner:
                 missing += 1
             elif not item["ignored"] and not item["deleted"]:
-                item["deleted"] = True
+                item.update(deleted=True, deleted_at=int(time.time()), automatic=automatic)
+                if automatic and (item.get("media") or {}).get("kind") not in {"photo", "sticker"}:
+                    item["media"] = None
                 item["expires"] = time.monotonic() + self.ttl
                 found += 1
         return found, missing
@@ -316,7 +329,7 @@ class PostgresMessageHistory:
         item = temporary.items[key]
         if old:
             previous = json.loads(old[0][0])
-            item.update(token=previous["token"], deleted=previous["deleted"])
+            item.update(token=previous["token"], deleted=previous["deleted"], deleted_at=previous.get("deleted_at"), automatic=previous.get("automatic", False))
         item["expires"] = time.time() + 86400
         self._execute([
             ("INSERT INTO qalqon_history(connection,chat,message,owner,expires,payload) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(connection,chat,message) DO UPDATE SET owner=excluded.owner,expires=excluded.expires,payload=excluded.payload", (*key, owner, item["expires"], json.dumps(item))),
@@ -325,7 +338,7 @@ class PostgresMessageHistory:
             ("DELETE FROM qalqon_history WHERE (connection,chat,message) IN (SELECT connection,chat,message FROM qalqon_history ORDER BY expires DESC OFFSET 20000)", ()),
         ])
 
-    def mark_deleted(self, owner, connection, chat_id, message_ids):
+    def mark_deleted(self, owner, connection, chat_id, message_ids, automatic=False):
         rows = self._execute([("SELECT message,payload FROM qalqon_history WHERE owner=%s AND connection=%s AND chat=%s AND expires>%s", (owner, connection, chat_id, time.time()))])
         records = {row[0]: json.loads(row[1]) for row in rows}
         found = missing = 0
@@ -335,7 +348,9 @@ class PostgresMessageHistory:
             if item is None:
                 missing += 1
             elif not item["ignored"] and not item["deleted"]:
-                item["deleted"] = True
+                item.update(deleted=True, deleted_at=int(time.time()), automatic=automatic)
+                if automatic and (item.get("media") or {}).get("kind") not in {"photo", "sticker"}:
+                    item["media"] = None
                 item["expires"] = time.time() + 86400
                 found += 1
                 writes.append(("UPDATE qalqon_history SET payload=%s,expires=%s WHERE owner=%s AND connection=%s AND chat=%s AND message=%s", (json.dumps(item), item["expires"], owner, connection, chat_id, message_id)))
@@ -2067,7 +2082,7 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
             session, owner_chat_id, str(connection_id), message, reason,
         ):
             if store.history_enabled(owner_user_id):
-                DELETED_HISTORY.remember(owner_user_id, str(connection_id), message, ignored=True)
+                DELETED_HISTORY.mark_deleted(owner_user_id, str(connection_id), message["chat"]["id"], [message["message_id"]], automatic=True)
             store.record_security_event(
                 owner_user_id, str(connection_id), int(message["chat"]["id"]),
                 security_chat_label(message), security_event_category(message, result),
@@ -2295,11 +2310,54 @@ def miniapp_owner(raw: str) -> int:
     return owner
 
 
+def miniapp_chat_row(row):
+    media = row.get("media") or {}
+    kind = media.get("kind")
+    return {"chat": str(row["chat_id"]), "name": row["sender"], "text": row["text"],
+            "sent": row.get("sent_at"), "deleted": row.get("deleted_at"),
+            "automatic": bool(row.get("automatic")), "kind": kind, "emoji": media.get("emoji"),
+            "preview": row["token"] if kind in {"photo", "sticker"} else None}
+
+
+async def history_preview(session, item):
+    media = (item or {}).get("media") or {}
+    if media.get("kind") not in {"photo", "sticker"}:
+        raise web.HTTPNotFound()
+    limit = 5 * 1024 * 1024
+    try:
+        meta = await api(session, "getFile", {"file_id": media.get("preview") or media["file_id"]})
+        path = meta.get("file_path", "")
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+", path) or meta.get("file_size", 0) > limit:
+            raise web.HTTPNotFound()
+        async with session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}",
+                               allow_redirects=False, timeout=aiohttp.ClientTimeout(total=15)) as res:
+            if res.status != 200:
+                raise web.HTTPNotFound()
+            data = bytearray()
+            async for chunk in res.content.iter_chunked(65536):
+                if len(data) + len(chunk) > limit:
+                    raise web.HTTPRequestEntityTooLarge(max_size=limit, actual_size=len(data)+len(chunk))
+                data.extend(chunk)
+        if data.startswith(bytes.fromhex("ffd8ff")):
+            mime = "image/jpeg"
+        elif data[:8] == bytes.fromhex("89504e470d0a1a0a"):
+            mime = "image/png"
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            mime = "image/webp"
+        else:
+            raise web.HTTPNotFound()
+        return web.Response(body=bytes(data), content_type=mime)
+    except (aiohttp.ClientError, asyncio.TimeoutError, TelegramAPIError):
+        raise web.HTTPServiceUnavailable() from None
+
+
 def register_miniapp(app, session, store):
+    media_limit = InteractionLimiter(capacity=180)
+    media_slots = asyncio.Semaphore(4)
     async def page(request):
         return web.FileResponse(Path(__file__).with_name("miniapp.html"), headers={
             "Content-Type": "text/html; charset=utf-8",
-            "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline' https://telegram.org; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'none'; form-action 'none'",
+            "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline' https://telegram.org; style-src 'unsafe-inline'; connect-src 'self'; img-src blob:; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'none'; form-action 'none'",
         })
 
     async def endpoint(request):
@@ -2307,13 +2365,21 @@ def register_miniapp(app, session, store):
             owner = miniapp_owner(request.headers.get("X-Telegram-Init-Data", ""))
         except (KeyError, TypeError, ValueError):
             return web.json_response({"error": "Ilovani Telegram botidan qayta oching."}, status=401)
-        if not PRIVATE_LIMITER.allow(("miniapp", owner)):
+        is_media = "token" in request.match_info
+        limiter = media_limit if is_media else PRIVATE_LIMITER
+        if not limiter.allow(("miniapp", owner)):
             return web.json_response({"error": "Bir oz kutib qayta urining."}, status=429)
         if await subscription_state(session, owner) != "member":
             return web.json_response({"error": "Botdagi kanal obunasini tasdiqlang."}, status=403)
         readers = {"auto": store.auto_delete_enabled, "warning": store.outgoing_warning_enabled, "history": store.history_enabled}
         setters = {"auto": store.set_auto_delete, "warning": store.set_outgoing_warning, "history": store.set_history}
         try:
+            if is_media:
+                if not store.history_enabled(owner):
+                    raise web.HTTPNotFound()
+                async with media_slots:
+                    item = DELETED_HISTORY.detail(owner, request.match_info["token"])
+                    return await history_preview(session, item)
             if request.method == "PUT":
                 body = await request.json()
                 if not isinstance(body, dict) or body.get("key") not in tuple(setters) or type(body.get("enabled")) is not bool:
@@ -2324,7 +2390,7 @@ def register_miniapp(app, session, store):
                     DELETED_HISTORY.clear(owner)
             if request.path.endswith("/history"):
                 rows = DELETED_HISTORY.deleted(owner) if store.history_enabled(owner) else []
-                return web.json_response({"messages": [{"chat": str(row["chat_id"]), "name": row["sender"], "text": row["text"]} for row in rows]})
+                return web.json_response({"messages": [miniapp_chat_row(row) for row in rows]})
             return web.json_response({"connected": bool(store.active_connection_id(owner)),
                                       "settings": {key: reader(owner) for key, reader in readers.items()}})
         except (TypeError, ValueError):
@@ -2336,6 +2402,7 @@ def register_miniapp(app, session, store):
     app.router.add_get("/miniapp/state", endpoint)
     app.router.add_put("/miniapp/state", endpoint)
     app.router.add_get("/miniapp/history", endpoint)
+    app.router.add_get("/miniapp/media/{token}", endpoint)
 
 
 def create_webhook_app(
