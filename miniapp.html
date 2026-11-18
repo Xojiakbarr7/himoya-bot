@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>Qalqon AI</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;color:#f6f6f6;font:16px/1.45 system-ui,sans-serif;background:radial-gradient(ellipse at 50% 3%,#142e52 0,transparent 48%),#0b1729;min-height:100vh}main{max-width:520px;margin:auto;padding:clamp(24px,7vh,72px) 20px 115px}header{display:flex;align-items:center;justify-content:center;gap:13px}h1{font-size:36px;letter-spacing:-1.7px;margin:0}h2{font-size:24px;letter-spacing:-.8px;margin:30px 0 8px}small,.hint{color:#acbed1}.mark{width:62px;height:72px;display:grid;place-items:center;clip-path:polygon(50% 0,95% 18%,91% 58%,78% 79%,50% 100%,22% 79%,9% 58%,5% 18%);background:linear-gradient(135deg,#f0fbff,#58beff 26%,#20477a 47%,#9edfff 68%,#2667ae);filter:drop-shadow(0 4px 7px #071326)}.mark:before{content:"✓";display:grid;place-items:center;width:88%;height:88%;clip-path:inherit;background:linear-gradient(145deg,#287bcd,#0a2d56 49%,#184a7a 51%,#091629);color:#83dcff;font-size:34px;font-weight:800}.status{text-align:center;margin:14px 0 38px;color:#c6d7e8}.status strong{color:#54cafa}.card,details{background:linear-gradient(125deg,#192f4b,#101f34);border:1px solid #334c69;border-radius:18px;box-shadow:inset 0 1px #ffffff10,0 6px 18px #030b171f;margin:12px 0;overflow:hidden}.row{width:100%;display:flex;align-items:center;gap:13px;padding:19px 16px;text-align:left}.tile{background:linear-gradient(145deg,#235e8e,#112a45);color:#93dfff;border:1px solid #48749a;border-radius:12px;width:42px;height:42px;display:grid;place-items:center;font-size:21px}.end{margin-left:auto;color:#80d3fa;white-space:nowrap}button,summary{font:inherit;color:inherit;cursor:pointer}button{background:none;border:0}button:focus-visible,summary:focus-visible{outline:2px solid #81d4ff;outline-offset:-3px}.row small{display:block;margin-top:3px}nav{position:fixed;bottom:0;inset-inline:0;margin:auto;max-width:520px;display:flex;padding:8px 8px max(10px,env(safe-area-inset-bottom));background:#0d1d31f7;border-top:1px solid #304760}nav button{min-height:54px;flex:1;color:#a0b2c8;font-size:12px;font-weight:650}nav b{display:block;font-size:21px}nav .active{color:#69ccff;background:#152e4a;border-radius:12px}.switch{flex:none;width:46px;height:27px;background:#435367;border-radius:99px;padding:3px;margin-left:auto}.switch:before{content:"";display:block;width:21px;height:21px;background:#fff;border-radius:50%}[aria-checked=true] .switch{background:#067cbd}[aria-checked=true] .switch:before{transform:translateX(19px)}summary{padding:16px;font-weight:650}summary small{margin-left:8px}details p{padding:12px 16px;margin:0;border-top:1px solid #34445a;white-space:pre-wrap;overflow-wrap:anywhere}#notice{color:#ffd29b}.retry{color:#8bd9ff;text-decoration:underline;padding:8px}[hidden]{display:none!important}
+</style></head><body><main><header><span class="mark" aria-hidden="true"></span><h1>Qalqon AI</h1></header>
+<p class="status">Telegram Business · <strong id="status">Yuklanmoqda…</strong></p><p id="notice" role="status"></p><button class="retry" id="retry" hidden>Qayta urinish</button>
+<section id="home"><button class="card row" data-go="settings"><span class="tile">♲</span><b>Avto o‘chirish</b><small class="end" id="auto">…</small><span>›</span></button><button class="card row" data-go="history"><span class="tile">☷</span><b>O‘chirilgan xabarlar</b><span class="end">›</span></button></section>
+<section id="history" hidden><h2>O‘chirilgan xabarlar</h2><small>Oxirgi 24 soat</small><div id="chats"></div></section>
+<section id="settings" hidden><h2>Sozlamalar</h2><div id="controls"></div></section></main>
+<nav aria-label="Asosiy menyu"><button data-go="home" class="active"><b>⌂</b>Bosh sahifa</button><button data-go="history"><b>◷</b>Tarix</button><button data-go="settings"><b>⚙</b>Sozlamalar</button></nav>
+<script>
+const tg=window.Telegram?.WebApp;
+tg?.ready();tg?.expand();tg?.setHeaderColor?.('#0b1729');
+const byId=id=>document.getElementById(id);
+const fields=[
+ ['auto','Avto o‘chirish','APK fayllari va barcha havolali xabarlar'],
+ ['warning','Chiquvchi ogohlantirish','Siz yuborgan shubhali xabar ostida ogohlantirish'],
+ ['history','Xabarlar tarixi','Xabarlarni 24 soat saqlash']
+];
+let state=null,current='home',busy=false,sequence=0;
+async function api(path,change){
+ if(!tg?.initData)throw Error('Ilovani Telegramda @Qalqonn_bot orqali oching.');
+ const response=await fetch('/miniapp/'+path,{method:change?'PUT':'GET',cache:'no-store',headers:{'X-Telegram-Init-Data':tg.initData,'Content-Type':'application/json'},body:change?JSON.stringify(change):undefined});
+ const data=await response.json();if(!response.ok)throw Error(data.error||'Server bilan bog‘lanib bo‘lmadi.');return data;
+}
+function message(text=''){byId('notice').textContent=text;byId('retry').hidden=!text}
+function element(tag,text){const el=document.createElement(tag);el.textContent=text;return el}
+function render(){
+ byId('status').textContent=state.connected?'Ulangan':'Ulanmagan';
+ byId('auto').textContent=state.settings.auto?'Yoqilgan':'O‘chiq';
+ const controls=byId('controls');controls.replaceChildren();
+ for(const [key,title,info] of fields){
+  const button=element('button','');button.className='card row';button.dataset.key=key;button.setAttribute('role','switch');button.setAttribute('aria-checked',String(state.settings[key]));
+  const label=element('span','');label.append(element('b',title),element('small',info));
+  const toggle=element('span','');toggle.className='switch';button.append(label,toggle);controls.append(button);
+ }
+}
+async function show(page){
+ current=page;const id=++sequence;message();
+ for(const name of ['home','history','settings'])byId(name).hidden=name!==page;
+ document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.go===page));
+ try{
+  if(!state){const fresh=await api('state');if(id!==sequence)return;state=fresh;render()}
+  if(page!=='history')return;
+  const list=byId('chats');list.textContent='Yuklanmoqda…';
+  const {messages}=await api('history');if(id!==sequence)return;
+  list.replaceChildren();if(!messages.length){list.textContent=state.settings.history?'Hozircha saqlangan o‘chirilgan xabar yo‘q.':'Tarix o‘chiq. Uni sozlamalarda yoqishingiz mumkin.';return}
+  const groups=new Map();for(const item of messages){if(!groups.has(item.chat))groups.set(item.chat,[]);groups.get(item.chat).push(item)}
+  for(const rows of groups.values()){
+   const box=element('details',''),summary=element('summary',rows[0].name);summary.append(element('small',rows.length+' ta xabar'));box.append(summary);
+   for(const row of [...rows].reverse())box.append(element('p',row.text));list.append(box);
+  }
+ }catch(e){if(id===sequence){if(!state)byId('status').textContent='Holat olinmadi';byId('chats').replaceChildren();message(e.message)}}
+}
+document.addEventListener('click',async e=>{
+ const b=e.target.closest('button');if(!b||busy)return;
+ if(b.dataset.go)return show(b.dataset.go);
+ if(b.id==='retry'){state=null;return show(current)}
+ if(!b.dataset.key||!state)return;
+ const key=b.dataset.key,enabled=!state.settings[key];
+ if(key==='history'&&!enabled&&!confirm('Tarix o‘chirilsinmi? Saqlangan xabarlar ham o‘chadi.'))return;
+ if(key==='history'&&enabled&&!confirm('Xabarlarni 24 soat saqlash yoqilsinmi?'))return;
+ if(key==='auto'&&enabled&&!confirm('APK va barcha havolali xabarlar avtomatik o‘chirilsinmi?'))return;
+ busy=true;b.disabled=true;
+ try{state=await api('state',{key,enabled});render();message()}catch(e){message(e.message)}finally{busy=false;b.disabled=false}
+});
+show('home');
+</script></body></html>
