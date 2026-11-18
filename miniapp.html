@@ -3,6 +3,13 @@
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 *{box-sizing:border-box}body{margin:0;color:#f6f6f6;font:16px/1.45 system-ui,sans-serif;background:radial-gradient(ellipse at 50% 3%,#142e52 0,transparent 48%),#0b1729;min-height:100vh}main{max-width:520px;margin:auto;padding:clamp(24px,7vh,72px) 20px 115px}header{display:flex;align-items:center;justify-content:center;gap:13px}h1{font-size:36px;letter-spacing:-1.7px;margin:0}h2{font-size:24px;letter-spacing:-.8px;margin:30px 0 8px}small,.hint{color:#acbed1}.mark{width:62px;height:72px;display:grid;place-items:center;clip-path:polygon(50% 0,95% 18%,91% 58%,78% 79%,50% 100%,22% 79%,9% 58%,5% 18%);background:linear-gradient(135deg,#f0fbff,#58beff 26%,#20477a 47%,#9edfff 68%,#2667ae);filter:drop-shadow(0 4px 7px #071326)}.mark:before{content:"✓";display:grid;place-items:center;width:88%;height:88%;clip-path:inherit;background:linear-gradient(145deg,#287bcd,#0a2d56 49%,#184a7a 51%,#091629);color:#83dcff;font-size:34px;font-weight:800}.status{text-align:center;margin:14px 0 38px;color:#c6d7e8}.status strong{color:#54cafa}.card,details{background:linear-gradient(125deg,#192f4b,#101f34);border:1px solid #334c69;border-radius:18px;box-shadow:inset 0 1px #ffffff10,0 6px 18px #030b171f;margin:12px 0;overflow:hidden}.row{width:100%;display:flex;align-items:center;gap:13px;padding:19px 16px;text-align:left}.tile{background:linear-gradient(145deg,#235e8e,#112a45);color:#93dfff;border:1px solid #48749a;border-radius:12px;width:42px;height:42px;display:grid;place-items:center;font-size:21px}.end{margin-left:auto;color:#80d3fa;white-space:nowrap}button,summary{font:inherit;color:inherit;cursor:pointer}button{background:none;border:0}button:focus-visible,summary:focus-visible{outline:2px solid #81d4ff;outline-offset:-3px}.row small{display:block;margin-top:3px}nav{position:fixed;bottom:0;inset-inline:0;margin:auto;max-width:520px;display:flex;padding:8px 8px max(10px,env(safe-area-inset-bottom));background:#0d1d31f7;border-top:1px solid #304760}nav button{min-height:54px;flex:1;color:#a0b2c8;font-size:12px;font-weight:650}nav b{display:block;font-size:21px}nav .active{color:#69ccff;background:#152e4a;border-radius:12px}.switch{flex:none;width:46px;height:27px;background:#435367;border-radius:99px;padding:3px;margin-left:auto}.switch:before{content:"";display:block;width:21px;height:21px;background:#fff;border-radius:50%}[aria-checked=true] .switch{background:#067cbd}[aria-checked=true] .switch:before{transform:translateX(19px)}summary{padding:16px;font-weight:650}summary small{margin-left:8px}details p{padding:12px 16px;margin:0;border-top:1px solid #34445a;white-space:pre-wrap;overflow-wrap:anywhere}#notice{color:#ffd29b}.retry{color:#8bd9ff;text-decoration:underline;padding:8px}[hidden]{display:none!important}
+
+.thread{display:flex;flex-direction:column;align-items:flex-start;gap:7px;padding:14px;background:linear-gradient(150deg,#0b192a,#11273a)}
+.bubble{background:#213951;border:1px solid #31506b;border-radius:15px 15px 15px 4px;padding:9px 12px;max-width:88%;min-width:112px;color:#eff6ff;overflow-wrap:anywhere}
+.bubble .caption{white-space:pre-wrap}.stamp{display:block;text-align:right;color:#a6c3d9;font-size:11px;margin-top:5px}
+.bubble img{display:block;max-width:100%;max-height:235px;border-radius:9px;object-fit:contain}
+.picture{width:min(210px,100%);min-height:48px}.sticker{min-width:100px}.sticker img{max-width:120px;max-height:120px}
+.media-note{color:#b4cadd;font-size:14px}.sticker .media-note{font-size:22px}
 </style></head><body><main><header><span class="mark" aria-hidden="true"></span><h1>Qalqon AI</h1></header>
 <p class="status">Telegram Business · <strong id="status">Yuklanmoqda…</strong></p><p id="notice" role="status"></p><button class="retry" id="retry" hidden>Qayta urinish</button>
 <section id="home"><button class="card row" data-go="settings"><span class="tile">♲</span><b>Avto o‘chirish</b><small class="end" id="auto">…</small><span>›</span></button><button class="card row" data-go="history"><span class="tile">☷</span><b>O‘chirilgan xabarlar</b><span class="end">›</span></button></section>
@@ -36,7 +43,62 @@ function render(){
   const toggle=element('span','');toggle.className='switch';button.append(label,toggle);controls.append(button);
  }
 }
+const clock=new Intl.DateTimeFormat('uz-UZ',{hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+const day=new Intl.DateTimeFormat('uz-UZ',{day:'numeric',month:'short'});
+const mediaUrls=new Set();
+let mediaObserver;
+function clearThreadMedia(){
+ mediaObserver?.disconnect();
+ for(const url of mediaUrls)URL.revokeObjectURL(url);
+ mediaUrls.clear();
+}
+function clockText(epoch){
+ const d=new Date(epoch*1000);
+ return day.format(d)+' · '+clock.format(d);
+}
+function observeMedia(){
+ const observer=new IntersectionObserver(entries=>{
+  for(const {target,isIntersecting} of entries){
+   if(!isIntersecting)continue;
+   observer.unobserve(target);
+   loadPreview(target);
+  }
+ },{rootMargin:'80px'});
+ return observer;
+}
+async function loadPreview(target){
+ const version=sequence;
+ try{
+  const response=await fetch('/miniapp/media/'+encodeURIComponent(target.dataset.preview),{
+   cache:'no-store',headers:{'X-Telegram-Init-Data':tg.initData}});
+  if(!response.ok)throw Error();
+  const blob=await response.blob();
+  if(sequence!==version||!target.isConnected)return;
+  const url=URL.createObjectURL(blob);mediaUrls.add(url);
+  const img=new Image();img.alt=target.dataset.label;img.src=url;
+  img.onload=()=>{if(target.isConnected&&sequence===version)target.replaceChildren(img)};
+ }catch{target.title='Media ko‘rinishi hozir mavjud emas.'}
+}
+function bubble(row){
+ const el=element('article','');el.className='bubble';
+ const visual=row.kind==='photo'||row.kind==='sticker';
+ if(visual){
+  const label=row.kind==='photo'?'Rasm':'Stiker';
+  const media=element('div',row.emoji?row.emoji+' '+label:label);
+  media.className='media-note '+(row.kind==='photo'?'picture':'sticker');
+  if(row.preview){media.dataset.label=label;media.dataset.preview=row.preview;mediaObserver.observe(media)}
+  el.append(media);
+ }
+ if(row.text&&(!visual||row.text!=='['+row.kind+']')){
+  const text=element('div',row.text);text.className='caption';el.append(text);
+ }
+ const label=row.automatic?'Avto o‘chirildi':'O‘chirildi';
+ const meta=element('small',row.deleted?label+' · '+clockText(row.deleted):'O‘chirilgan vaqt saqlanmagan');
+ meta.className='stamp';el.append(meta);
+ return el;
+}
 async function show(page){
+ clearThreadMedia();byId('chats').replaceChildren();
  current=page;const id=++sequence;message();
  for(const name of ['home','history','settings'])byId(name).hidden=name!==page;
  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.go===page));
@@ -46,10 +108,17 @@ async function show(page){
   const list=byId('chats');list.textContent='Yuklanmoqda…';
   const {messages}=await api('history');if(id!==sequence)return;
   list.replaceChildren();if(!messages.length){list.textContent=state.settings.history?'Hozircha saqlangan o‘chirilgan xabar yo‘q.':'Tarix o‘chiq. Uni sozlamalarda yoqishingiz mumkin.';return}
+  mediaObserver=observeMedia();
   const groups=new Map();for(const item of messages){if(!groups.has(item.chat))groups.set(item.chat,[]);groups.get(item.chat).push(item)}
   for(const rows of groups.values()){
    const box=element('details',''),summary=element('summary',rows[0].name);summary.append(element('small',rows.length+' ta xabar'));box.append(summary);
-   for(const row of [...rows].reverse())box.append(element('p',row.text));list.append(box);
+   const thread=element('div','');thread.className='thread';box.append(thread);
+   box.addEventListener('toggle',()=>{
+    if(!box.open||thread.childElementCount)return;
+    const ordered=[...rows].reverse().sort((a,b)=>(a.sent||a.deleted||0)-(b.sent||b.deleted||0));
+    for(const row of ordered)thread.append(bubble(row));
+   });
+   list.append(box);
   }
  }catch(e){if(id===sequence){if(!state)byId('status').textContent='Holat olinmadi';byId('chats').replaceChildren();message(e.message)}}
 }
@@ -67,3 +136,4 @@ document.addEventListener('click',async e=>{
 });
 show('home');
 </script></body></html>
+
