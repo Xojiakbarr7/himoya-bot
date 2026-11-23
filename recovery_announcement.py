@@ -62,3 +62,37 @@ async def run(session, api_base, execute):
         await asyncio.sleep(.15)
     counts = await db([("SELECT status,COUNT(*) FROM qalqon_announcement_delivery WHERE campaign=%s GROUP BY status",(CAMPAIGN,))])
     log.info("Recovery announcement completed: %s",dict(counts))
+    await publish_channel(session, api_base, db)
+
+
+async def publish_channel(session, api_base, db):
+    campaign = "channel_recovery_public_2026_11_23"
+    existing = await db([("SELECT 1 FROM qalqon_announcements WHERE campaign=%s", (campaign,))])
+    if existing:
+        return
+    async with session.post(api_base+"/getChat", json={"chat_id":"@qalqon_ai1"}, allow_redirects=False) as response:
+        result = await response.json()
+    if not result.get("ok"):
+        log.warning("Public recovery announcement: channel lookup failed")
+        return
+    chat = result["result"]
+    if chat.get("type") != "channel" or chat.get("username", "").lower() != "qalqon_ai1":
+        log.warning("Public recovery announcement: unexpected destination")
+        return
+    claimed = await db([("INSERT INTO qalqon_announcements VALUES(%s) ON CONFLICT DO NOTHING RETURNING campaign", (campaign,))])
+    if not claimed:
+        return
+    body = TEXT.replace("Boshlash uchun pastdagi «Kanalni ulash» tugmasini bosing. Bot sizga bosqichma-bosqich yordam beradi.",
+                        "Boshlash uchun pastdagi tugma orqali botga kiring. Menyudan «🔑 Kanalga qaytish» → «➕ Kanalni ulash»ni tanlang. Bot sizga bosqichma-bosqich yordam beradi.")
+    payload = {"chat_id":chat["id"], "text":body, "reply_markup":{"inline_keyboard":[
+        [{"text":"🛡 Qalqon AI botini ochish", "url":"https://t.me/Qalqonn_bot"}]]}}
+    try:
+        async with session.post(api_base+"/sendMessage",json=payload,allow_redirects=False) as response:
+            sent = await response.json()
+        if sent.get("ok"):
+            log.info("Public recovery announcement sent: channel=%s message=%s", chat["id"],sent["result"]["message_id"])
+        else:
+            await db([("DELETE FROM qalqon_announcements WHERE campaign=%s",(campaign,))])
+            log.warning("Public recovery announcement rejected: code=%s",sent.get("error_code"))
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        log.warning("Public recovery announcement delivery uncertain; not duplicated")
