@@ -142,11 +142,11 @@ async def handle_core(update, api, db):
                 raise ValueError("Botga tanlangan boshqaruv huquqlarini ham bering.")
             code = secrets.token_urlsafe(24)
             digest = hashlib.sha256(code.encode()).hexdigest()
-            await tell(owner, f"🔐 Tiklash kodingiz\n{code}\n\nKanal/guruh ID\n{chat}\n\nKodni ishonchli joyga saqlang. Tiklash shu Telegram akkauntiga bog‘langan. Kanal yoki guruh butunlay o‘chirilsa tiklash ishlamaydi.")
+            await tell(owner, f"🔐 Shu akkaunt uchun tiklash kodi\n{code}\n\nKanal/guruh ID\n{chat}\n\nBu kod faqat shu akkaunt uchun. Boshqa akkauntdan tiklash uchun alohida zaxira kalit yarating. Kanal yoki guruh butunlay o‘chirilsa tiklash ishlamaydi.")
             db([("INSERT INTO qalqon_recovery(chat,owner,title,digest,rights) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(chat) DO UPDATE SET owner=excluded.owner,title=excluded.title,digest=excluded.digest,rights=excluded.rights,enabled=TRUE,failures=0,locked_until=0,invite=NULL,expires=0", (chat,owner,info["title"],digest,json.dumps(rights))), ("DELETE FROM qalqon_recovery_backup WHERE chat=%s", (chat,))])
             log(chat, owner, "registered")
             db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s", (owner,))])
-            await tell(owner, "✅ Kanalga qaytish sozlandi. Qaytish kerak bo‘lsa, «Kanallarim va guruhlarim»dan suhbatni tanlab kodingizni yuboring.", [[{"text": "Kanallarim va guruhlarim", "callback_data": "recovery:list"}]])
+            await tell(owner, "✅ Kanal yoki guruh ulandi. Boshqa akkauntdan qaytish uchun hozir zaxira kalit yarating.", [[{"text": "🔐 Zaxira kalit yaratish", "callback_data": f"backup:create:{chat}"}], [{"text": "Kanallarim va guruhlarim", "callback_data": "recovery:list"}]])
             return True
         parts = text.split()
         if len(parts) != 3:
@@ -248,7 +248,7 @@ async def handle_backup(update, api, db):
             await api("answerCallbackQuery", {"callback_query_id":query["id"]})
         if data == "backup:enter":
             db([("INSERT INTO qalqon_recovery_dialog VALUES(%s,'backup_key',NULL,%s) ON CONFLICT(owner) DO UPDATE SET stage='backup_key',chat=NULL,expires=excluded.expires", (actor,time.time()+900))])
-            await send(actor,"🔑 Oldindan olingan zaxira kalitingizni shu yerga yuboring. Kalitni hech kimga bermang.")
+            await send(actor,"🔑 Oldindan yaratilgan zaxira kalitni yuboring. U QALQON_ bilan boshlanadi.\n\nAvvalgi qisqa tiklash kodi boshqa akkauntdan kirish uchun ishlamaydi. Zaxira kalitni kanal yoki guruh egasi oldindan yaratishi kerak.")
             return True
         if data.startswith(("backup:create:", "backup:revoke:")):
             chat = int(data.rsplit(":",1)[1])
@@ -266,13 +266,16 @@ async def handle_backup(update, api, db):
             key = "QALQON_" + secrets.token_urlsafe(32)
             digest = hashlib.sha256(key.encode()).hexdigest()
             db([("INSERT INTO qalqon_recovery_backup(chat,owner,digest) VALUES(%s,%s,%s) ON CONFLICT(chat) DO UPDATE SET owner=excluded.owner,digest=excluded.digest,claimant=NULL,claim_until=0,invite=NULL,used=FALSE",(chat,actor,digest))])
-            await send(actor,"🔐 Zaxira kalit:\n"+key+"\n\nUni Telegramdan tashqarida xavfsiz saqlang. Bu kalitni bilgan odam boshqa akkauntdan admin bo‘lishi mumkin. Yangi kalit yaratsangiz, eskisi bekor bo‘ladi. Kanalni boshqa kishiga topshirishdan avval kalitni bekor qiling.")
+            await send(actor,"🔐 Boshqa akkaunt uchun zaxira kalit:\n"+key+"\n\nQALQON_ bilan boshlangan kalitni to‘liq nusxalab, Telegramdan tashqarida xavfsiz saqlang. Bu kalitni bilgan odam boshqa akkauntdan admin bo‘lishi mumkin. Yangi kalit yaratsangiz, eskisi bekor bo‘ladi. Kanalni boshqa kishiga topshirishdan avval kalitni bekor qiling.")
             return True
         if receiving:
             key = (message.get("text") or "").strip()
             if key == "❌ Bekor qilish":
                 db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s",(actor,))])
                 await send(actor,"Bekor qilindi.")
+                return True
+            if not key.startswith("QALQON_"):
+                await send(actor,"⚠️ Bu zaxira kalitga o‘xshamaydi. Boshqa akkauntdan kirish uchun QALQON_ bilan boshlanadigan kalit kerak.\n\nUni kanal egasi eski akkauntda: Kanal / guruhga qaytish → Kanallarim va guruhlarim → kanalni tanlash → Zaxira kalit yaratish orqali oladi. Avvalgi qisqa kod faqat o‘sha akkaunt uchun.")
                 return True
             now = time.time()
             db([("INSERT INTO qalqon_recovery_backup_attempt(actor) VALUES(%s) ON CONFLICT(actor) DO NOTHING",(actor,))])
