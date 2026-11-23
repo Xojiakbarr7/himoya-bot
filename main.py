@@ -104,6 +104,7 @@ def redact_secrets(text: str) -> str:
     for value in (BOT_TOKEN, os.environ.get("WEBHOOK_SECRET", ""), os.environ.get("VIRUSTOTAL_API_KEY", "")):
         if value:
             text = text.replace(value, "[REDACTED]")
+    text = re.sub(r"QALQON_[A-Za-z0-9_-]{43}", "[REDACTED_RECOVERY_KEY]", text)
     return re.sub(r"(?<![0-9])[0-9]{6,}:[A-Za-z0-9_-]{20,}", "[REDACTED]", text)
 
 
@@ -964,7 +965,8 @@ async def send_history_menu(session: aiohttp.ClientSession, store: Store, owner:
         "Yoqsangiz, bot yangi kiruvchi xabarlarning matni va oddiy media identifikatorini "
         "24 soatgacha (1 kun), oxirgi 1000 ta xabar doirasida saqlaydi. O‘chirilishi aniqlansa yana 24 soat saqlaydi. "
         "Rasm, video, ovoz, audio, hujjat, GIF va stiker qo‘llanadi. Fayl yuklab olinmaydi. "
-        "Bir martalik va himoyalangan media saqlanmaydi.\n\n"
+        "Bir martalik va himoyalangan media saqlanmaydi. Matn va media identifikatorlari "
+        "xizmat bazasida shifrlanmagan holda saqlanadi; faqat ishonchingiz bo‘lsa yoqing.\n\n"
         + ("✅ Tashqi baza ulangan: tarix server restartidan keyin ham qoladi.\n\n" if isinstance(DELETED_HISTORY, PostgresMessageHistory) else
            "⚠️ Doimiy baza hali ulanmagan: restartda tarix yo‘qoladi, 3 kun kafolatlanmaydi.\n\n") +
         "Telegram o‘chirish hodisasini yuborsa, oldindan eslab qolingan matnni shu bot chatida ko‘rishingiz mumkin. "
@@ -2519,6 +2521,7 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("Bot to‘xtatildi")
+
 
 
 
