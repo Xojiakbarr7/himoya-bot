@@ -274,6 +274,12 @@ async def handle_backup(update, api, db):
                 db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s",(actor,))])
                 await send(actor,"Bekor qilindi.")
                 return True
+            if key.startswith("QALQON_") and message.get("message_id"):
+                try:
+                    await api("deleteMessage", {"chat_id":actor,"message_id":message["message_id"]})
+                except RuntimeError:
+                    # Deletion is best-effort: never print the key or block recovery.
+                    pass
             if not key.startswith("QALQON_"):
                 await send(actor,"⚠️ Bu zaxira kalitga o‘xshamaydi. Boshqa akkauntdan kirish uchun QALQON_ bilan boshlanadigan kalit kerak.\n\nUni kanal egasi eski akkauntda: Kanal / guruhga qaytish → Kanallarim va guruhlarim → kanalni tanlash → Zaxira kalit yaratish orqali oladi. Avvalgi qisqa kod faqat o‘sha akkaunt uchun.")
                 return True
