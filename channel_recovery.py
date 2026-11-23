@@ -19,6 +19,8 @@ SCHEMA = [
     ("CREATE TABLE IF NOT EXISTS qalqon_recovery_dialog (owner BIGINT PRIMARY KEY, stage TEXT NOT NULL, chat BIGINT, expires DOUBLE PRECISION NOT NULL)", ()),
     ("CREATE TABLE IF NOT EXISTS qalqon_recovery (chat BIGINT PRIMARY KEY, owner BIGINT NOT NULL, title TEXT NOT NULL, digest TEXT NOT NULL, rights TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, failures INTEGER NOT NULL DEFAULT 0, locked_until DOUBLE PRECISION NOT NULL DEFAULT 0, invite TEXT, expires DOUBLE PRECISION NOT NULL DEFAULT 0)", ()),
     ("CREATE TABLE IF NOT EXISTS qalqon_recovery_log (chat BIGINT NOT NULL, owner BIGINT NOT NULL, action TEXT NOT NULL, created DOUBLE PRECISION NOT NULL)", ()),
+    ("CREATE TABLE IF NOT EXISTS qalqon_recovery_backup (chat BIGINT PRIMARY KEY, owner BIGINT NOT NULL, digest TEXT UNIQUE NOT NULL, claimant BIGINT, claim_until DOUBLE PRECISION NOT NULL DEFAULT 0, invite TEXT, used BOOLEAN NOT NULL DEFAULT FALSE)", ()),
+    ("CREATE TABLE IF NOT EXISTS qalqon_recovery_backup_attempt (actor BIGINT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, locked_until DOUBLE PRECISION NOT NULL DEFAULT 0)", ()),
 ]
 
 
@@ -141,7 +143,7 @@ async def handle_core(update, api, db):
             code = secrets.token_urlsafe(24)
             digest = hashlib.sha256(code.encode()).hexdigest()
             await tell(owner, f"🔐 Tiklash kodingiz\n{code}\n\nKanal/guruh ID\n{chat}\n\nKodni ishonchli joyga saqlang. Tiklash shu Telegram akkauntiga bog‘langan. Kanal yoki guruh butunlay o‘chirilsa tiklash ishlamaydi.")
-            db([("INSERT INTO qalqon_recovery(chat,owner,title,digest,rights) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(chat) DO UPDATE SET owner=excluded.owner,title=excluded.title,digest=excluded.digest,rights=excluded.rights,enabled=TRUE,failures=0,locked_until=0,invite=NULL,expires=0", (chat,owner,info["title"],digest,json.dumps(rights)))])
+            db([("INSERT INTO qalqon_recovery(chat,owner,title,digest,rights) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(chat) DO UPDATE SET owner=excluded.owner,title=excluded.title,digest=excluded.digest,rights=excluded.rights,enabled=TRUE,failures=0,locked_until=0,invite=NULL,expires=0", (chat,owner,info["title"],digest,json.dumps(rights))), ("DELETE FROM qalqon_recovery_backup WHERE chat=%s", (chat,))])
             log(chat, owner, "registered")
             db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s", (owner,))])
             await tell(owner, "✅ Kanalga qaytish sozlandi. Qaytish kerak bo‘lsa, «Kanallarim va guruhlarim»dan suhbatni tanlab kodingizni yuboring.", [[{"text": "Kanallarim va guruhlarim", "callback_data": "recovery:list"}]])
@@ -188,7 +190,152 @@ async def handle_core(update, api, db):
 
 
 
+async def handle_backup(update, api, db):
+    """Separate opt-in bearer key; never changes the original owner's recovery code."""
+    message = update.get("message") or {}
+    query = update.get("callback_query") or {}
+    event = update.get("chat_join_request")
+    actor = (message.get("from") or query.get("from") or {}).get("id")
+    private = message.get("chat", {}).get("type") == "private"
+    data = query.get("data", "")
+    if query and query.get("message", {}).get("chat", {}).get("id") != actor:
+        return False
+    if not db:
+        if data.startswith("backup:"):
+            await api("answerCallbackQuery", {"callback_query_id": query["id"]})
+            await api("sendMessage", {"chat_id": actor, "text": "Baza vaqtincha ishlamayapti. Keyinroq qayta urining."})
+            return True
+        return False
+    db(SCHEMA)
+    dialog = db([("SELECT stage FROM qalqon_recovery_dialog WHERE owner=%s AND expires>%s", (actor,time.time()))]) if private and actor else []
+    receiving = bool(dialog and dialog[0][0] == "backup_key" and not message.get("text", "").startswith("/"))
+    if event:
+        chat = event["chat"]["id"]
+        link = event.get("invite_link", {}).get("invite_link")
+        if not link:
+            return False
+        rows = db([("SELECT owner,claimant,claim_until,invite FROM qalqon_recovery_backup WHERE chat=%s AND used=FALSE AND invite=%s", (chat,link))])
+        if not rows:
+            return False
+        original, target, until, _ = rows[0]
+        applicant = event["from"]["id"]
+        if applicant != target or until < time.time():
+            await api("declineChatJoinRequest", {"chat_id":chat,"user_id":applicant})
+            return True
+    elif not data.startswith("backup:") and not receiving:
+        return False
+
+    async def send(user, body, rows=None):
+        payload = {"chat_id":user,"text":body}
+        if rows:
+            payload["reply_markup"] = {"inline_keyboard":rows}
+        await api("sendMessage", payload)
+
+    async def check(chat, original):
+        admins = await api("getChatAdministrators", {"chat_id":chat})
+        creators = [a["user"]["id"] for a in admins if a["status"] == "creator"]
+        # A deleted creator may be absent; a different visible creator must block recovery.
+        if creators and creators != [original]:
+            raise ValueError("Kanal yoki guruh egasini tasdiqlab bo‘lmadi yoki egasi o‘zgargan. Xavfsizlik uchun tiklash to‘xtatildi.")
+        bot = await api("getMe", {})
+        member = await api("getChatMember", {"chat_id":chat,"user_id":bot["id"]})
+        if member.get("status") != "administrator" or not member.get("can_promote_members") or not member.get("can_invite_users"):
+            raise ValueError("Botga administrator qo‘shish va taklif qilish huquqlarini bering.")
+        return member
+
+    try:
+        if query:
+            await api("answerCallbackQuery", {"callback_query_id":query["id"]})
+        if data == "backup:enter":
+            db([("INSERT INTO qalqon_recovery_dialog VALUES(%s,'backup_key',NULL,%s) ON CONFLICT(owner) DO UPDATE SET stage='backup_key',chat=NULL,expires=excluded.expires", (actor,time.time()+900))])
+            await send(actor,"🔑 Oldindan olingan zaxira kalitingizni shu yerga yuboring. Kalitni hech kimga bermang.")
+            return True
+        if data.startswith(("backup:create:", "backup:revoke:")):
+            chat = int(data.rsplit(":",1)[1])
+            rows = db([("SELECT owner FROM qalqon_recovery WHERE chat=%s AND owner=%s AND enabled=TRUE",(chat,actor))])
+            if not rows:
+                raise ValueError("Avval kanal yoki guruhni egasi sifatida ulang.")
+            actual = await api("getChatMember", {"chat_id":chat,"user_id":actor})
+            if actual.get("status") != "creator":
+                raise ValueError("Zaxira kalitni faqat kanal yoki guruhning hozirgi egasi yaratishi mumkin.")
+            await check(chat,actor)
+            if data.startswith("backup:revoke:"):
+                db([("DELETE FROM qalqon_recovery_backup WHERE chat=%s AND owner=%s",(chat,actor))])
+                await send(actor,"✅ Zaxira kalit bekor qilindi.")
+                return True
+            key = "QALQON_" + secrets.token_urlsafe(32)
+            digest = hashlib.sha256(key.encode()).hexdigest()
+            db([("INSERT INTO qalqon_recovery_backup(chat,owner,digest) VALUES(%s,%s,%s) ON CONFLICT(chat) DO UPDATE SET owner=excluded.owner,digest=excluded.digest,claimant=NULL,claim_until=0,invite=NULL,used=FALSE",(chat,actor,digest))])
+            await send(actor,"🔐 Zaxira kalit:\n"+key+"\n\nUni Telegramdan tashqarida xavfsiz saqlang. Bu kalitni bilgan odam boshqa akkauntdan admin bo‘lishi mumkin. Yangi kalit yaratsangiz, eskisi bekor bo‘ladi. Kanalni boshqa kishiga topshirishdan avval kalitni bekor qiling.")
+            return True
+        if receiving:
+            key = (message.get("text") or "").strip()
+            if key == "❌ Bekor qilish":
+                db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s",(actor,))])
+                await send(actor,"Bekor qilindi.")
+                return True
+            now = time.time()
+            db([("INSERT INTO qalqon_recovery_backup_attempt(actor) VALUES(%s) ON CONFLICT(actor) DO NOTHING",(actor,))])
+            attempts = db([("SELECT locked_until FROM qalqon_recovery_backup_attempt WHERE actor=%s",(actor,))])
+            if attempts and attempts[0][0] > now:
+                raise ValueError("Juda ko‘p urinish. 15 daqiqadan keyin qayta urinib ko‘ring.")
+            digest = hashlib.sha256(key.encode()).hexdigest()
+            rows = db([("SELECT b.chat,b.owner,r.rights FROM qalqon_recovery_backup b JOIN qalqon_recovery r ON r.chat=b.chat AND r.owner=b.owner WHERE b.digest=%s AND b.used=FALSE AND r.enabled=TRUE",(digest,))])
+            if not rows:
+                db([("UPDATE qalqon_recovery_backup_attempt SET failures=failures+1,locked_until=CASE WHEN failures>=4 THEN %s ELSE locked_until END WHERE actor=%s",(now+900,actor))])
+                raise ValueError("Kalit noto‘g‘ri yoki ishlatilgan.")
+            chat,original,rights = rows[0]
+            member = await check(chat,original)
+            claimed = db([("UPDATE qalqon_recovery_backup SET claimant=%s,claim_until=%s WHERE chat=%s AND digest=%s AND used=FALSE AND (claimant IS NULL OR claimant=%s OR claim_until<%s) RETURNING chat",(actor,now+600,chat,digest,actor,now))])
+            if not claimed:
+                raise ValueError("Kalit bilan boshqa tiklash jarayoni boshlangan. Keyinroq urining.")
+            current = await api("getChatMember", {"chat_id":chat,"user_id":actor})
+            if current.get("status") == "kicked":
+                raise ValueError("Akkaunt bloklangan. Amaldagi administrator blokni olib tashlashi kerak.")
+            if current.get("status") in {"member","administrator","creator"}:
+                if current.get("status") == "member":
+                    granted = {k:True for k in json.loads(rights) if member.get(k)}
+                    if not granted:
+                        raise ValueError("Botda tanlangan admin huquqlari qolmagan.")
+                    await api("promoteChatMember", {"chat_id":chat,"user_id":actor,**granted})
+                db([("UPDATE qalqon_recovery_backup SET used=TRUE,invite=NULL WHERE chat=%s AND claimant=%s",(chat,actor)),("DELETE FROM qalqon_recovery_dialog WHERE owner=%s",(actor,))])
+                await send(actor,"✅ Kanal yoki guruhga administrator sifatida kirishingiz tayyor. Kalit ishlatildi.")
+                return True
+            link = await api("createChatInviteLink", {"chat_id":chat,"expire_date":int(now)+600,"creates_join_request":True,"name":"Qalqon backup"})
+            saved = db([("UPDATE qalqon_recovery_backup SET invite=%s WHERE chat=%s AND digest=%s AND claimant=%s AND used=FALSE RETURNING chat",(link["invite_link"],chat,digest,actor))])
+            if not saved:
+                raise ValueError("Kalit bekor qilingan. Qayta sozlash kerak.")
+            db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s",(actor,)),("UPDATE qalqon_recovery_backup_attempt SET failures=0,locked_until=0 WHERE actor=%s",(actor,))])
+            await send(actor,"Havolani bosing va kirish so‘rovini yuboring. Havola 10 daqiqa amal qiladi.",[[{"text":"Kanal / guruhga kirish","url":link["invite_link"]}]])
+            return True
+        if event:
+            rows = db([("SELECT rights FROM qalqon_recovery WHERE chat=%s AND owner=%s AND enabled=TRUE",(chat,original))])
+            if not rows:
+                raise ValueError("Tiklash ruxsati bekor qilingan.")
+            member = await check(chat,original)
+            granted = {k:True for k in json.loads(rows[0][0]) if member.get(k)}
+            if not granted:
+                raise ValueError("Botda tanlangan admin huquqlari qolmagan.")
+            await api("approveChatJoinRequest", {"chat_id":chat,"user_id":target})
+            await api("promoteChatMember", {"chat_id":chat,"user_id":target,**granted})
+            db([("UPDATE qalqon_recovery_backup SET used=TRUE,invite=NULL WHERE chat=%s AND claimant=%s",(chat,target))])
+            await send(target,"✅ Qaytdingiz. Tanlangan administrator huquqlari berildi. Zaxira kalit ishlatildi.")
+            try:
+                await api("revokeChatInviteLink", {"chat_id":chat,"invite_link":link})
+            except RuntimeError:
+                pass
+            return True
+    except (ValueError, RuntimeError) as exc:
+        recipient = target if event else actor
+        if recipient:
+            await send(recipient, str(exc) if isinstance(exc, ValueError) else "Telegram amalni bajarmadi. Bot huquqlarini tekshirib, kalitni qayta yuboring.")
+        return True
+    return True
+
+
 async def handle(update, api, db):
+    if await handle_backup(update, api, db):
+        return True
     message = update.get("message") or {}
     query = update.get("callback_query") or {}
     private = message.get("chat", {}).get("type") == "private"
@@ -233,9 +380,10 @@ async def handle(update, api, db):
         db(SCHEMA)
         if text in {BUTTON, LEGACY_BUTTON} or text in {"/kanal", "/tiklash"} or data == "recovery:home" or text == "❌ Bekor qilish":
             db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s", (owner,))])
-            await send("🔑 Kanal yoki guruhga qaytish\n\nAvval kanal yoki guruhingizni ulang va berilgan maxfiy kodni saqlang. Keyinchalik shu akkaunt orqali qayta kirishingiz mumkin.", [
+            await send("🔑 Kanal yoki guruhga qaytish\n\nAvval kanal yoki guruhingizni ulang. Boshqa akkauntdan qaytish uchun oldindan zaxira kalit yarating va uni xavfsiz saqlang.", [
                 [{"text":"➕ Kanal / guruhni ulash","callback_data":"recovery:add"}],
-                [{"text":"📋 Kanallarim va guruhlarim","callback_data":"recovery:list"}]])
+                [{"text":"📋 Kanallarim va guruhlarim","callback_data":"recovery:list"}],
+                [{"text":"🔐 Zaxira kalit bilan kirish","callback_data":"backup:enter"}]])
             return True
         if data == "recovery:add":
             stage("channel")
@@ -258,7 +406,7 @@ async def handle(update, api, db):
                 await send("Faol tiklash ruxsati topilmadi.", back)
                 return True
             stage("code",chat)
-            await send(f"{rows[0][0]}\n\nUlash paytida berilgan maxfiy tiklash kodini yuboring. Kod 15 daqiqa ichida kiritilishi kerak.",back)
+            await send(f"{rows[0][0]}\n\nShu akkauntdan qaytish uchun avvalgi tiklash kodini yuboring. Boshqa akkaunt uchun esa oldindan zaxira kalit yarating.", [[{"text":"🔐 Zaxira kalit yaratish","callback_data":f"backup:create:{chat}"}], [{"text":"🗑 Zaxira kalitni bekor qilish","callback_data":f"backup:revoke:{chat}"}]] + back)
             return True
         if dialog:
             step, chat = dialog[0]
@@ -291,3 +439,4 @@ async def handle(update, api, db):
         logging.getLogger("telegram_himoya").warning("Channel recovery operation failed")
         await send("Telegram yoki baza so‘rovni bajarmadi. Bot kanal yoki guruhda admin ekanini va kerakli huquqlarini tekshiring, keyin qayta urining.",back)
     return True
+
