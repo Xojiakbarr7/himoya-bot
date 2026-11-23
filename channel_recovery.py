@@ -7,7 +7,11 @@ import time
 import logging
 from urllib.parse import urlsplit
 
-BUTTON = "🔑 Kanalga qaytish"
+BUTTON = "🔑 Kanal / guruhga qaytish"
+LEGACY_BUTTON = "🔑 Kanalga qaytish"
+GROUP_RIGHTS = ("can_manage_chat", "can_delete_messages", "can_restrict_members",
+                "can_change_info", "can_invite_users", "can_pin_messages",
+                "can_promote_members", "can_manage_video_chats", "can_manage_topics")
 RIGHTS = ("can_post_messages", "can_edit_messages", "can_delete_messages", "can_change_info",
           "can_invite_users", "can_promote_members", "can_manage_video_chats",
           "can_post_stories", "can_edit_stories", "can_delete_stories")
@@ -25,7 +29,7 @@ async def handle_core(update, api, db):
     private = message.get("chat", {}).get("type") == "private"
     text = message.get("text", "") if private else ""
     data = query.get("data", "")
-    relevant = text == BUTTON or text.startswith(("/kanal", "/tiklash")) or data.startswith("recover:")
+    relevant = text in {BUTTON, LEGACY_BUTTON} or text.startswith(("/kanal", "/tiklash")) or data.startswith("recover:")
     if not relevant and not event:
         return False
 
@@ -51,7 +55,7 @@ async def handle_core(update, api, db):
         if creators and creators != [owner]:
             db([("UPDATE qalqon_recovery SET enabled=FALSE, invite=NULL, expires=0 WHERE chat=%s", (chat,))])
             log(chat, owner, "ownership_changed")
-            raise ValueError("Kanal egasi almashgan. Oldingi tiklash ruxsati bekor qilindi.")
+            raise ValueError("Kanal yoki guruh egasi almashgan. Oldingi tiklash ruxsati bekor qilindi.")
         bot = await api("getMe", {})
         member = await api("getChatMember", {"chat_id": chat, "user_id": bot["id"]})
         if member["status"] != "administrator" or not member.get("can_promote_members") or not member.get("can_invite_users"):
@@ -69,7 +73,7 @@ async def handle_core(update, api, db):
             if new["status"] != "administrator" or not new.get("can_promote_members") or not new.get("can_invite_users"):
                 db([("UPDATE qalqon_recovery SET invite=NULL,expires=0 WHERE chat=%s", (chat,))])
                 log(chat, owner, "bot_rights_lost")
-                await tell(owner, "⚠️ Kanalga qaytish imkoniyati o‘chdi. Botning admin huquqlarini tekshiring.")
+                await tell(owner, "⚠️ Qaytish imkoniyati o‘chdi. Botning admin huquqlarini tekshiring.")
             return True
         if event.get("invite_link", {}).get("invite_link") != invite or not invite:
             return True
@@ -85,7 +89,7 @@ async def handle_core(update, api, db):
             db([("UPDATE qalqon_recovery SET invite=NULL,expires=0 WHERE chat=%s", (chat,))])
             log(chat, owner, "administrator_restored")
             db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s", (owner,))])
-            await tell(owner, "✅ Kanalga qaytdingiz. Tanlangan admin huquqlari berildi.")
+            await tell(owner, "✅ Qaytdingiz. Tanlangan admin huquqlari berildi.")
             await api("revokeChatInviteLink", {"chat_id": chat, "invite_link": invite})
         except ValueError as exc:
             await tell(owner, str(exc))
@@ -97,10 +101,10 @@ async def handle_core(update, api, db):
             return True
         await api("answerCallbackQuery", {"callback_query_id": query["id"]})
     try:
-        if text == BUTTON or text == "/kanal":
+        if text in {BUTTON, LEGACY_BUTTON} or text == "/kanal":
             rows = db([("SELECT chat,title,enabled FROM qalqon_recovery WHERE owner=%s ORDER BY chat", (owner,))])
             lines = [f"{title} · {chat} · {'Faol' if enabled else 'Bekor qilingan'}" for chat,title,enabled in rows]
-            await tell(owner, "🔑 Kanalga qaytish\n\nBotni kanalingizga admin qiling. Administrator qo‘shish va taklif qilish huquqlarini bering.\n\nUlash uchun yuboring\n/kanal @kanal_nomi\nYopiq kanal uchun raqamli kanal ID’sini kiriting.\n\nTiklash uchun\n/tiklash KANAL_ID MAXFIY_KOD\n\n" + "\n".join(lines))
+            await tell(owner, "🔑 Kanal yoki guruhga qaytish\n\nBotni kanal yoki guruhingizga admin qiling. Administrator qo‘shish va taklif qilish huquqlarini bering.\n\nUlash uchun yuboring\n/kanal @kanal_nomi\nYopiq kanal uchun raqamli kanal ID’sini kiriting.\n\nTiklash uchun\n/tiklash KANAL_ID MAXFIY_KOD\n\n" + "\n".join(lines))
             return True
         if text.startswith("/kanal ") or data.startswith("recover:"):
             mode = "basic"
@@ -111,30 +115,36 @@ async def handle_core(update, api, db):
                 chat = text.split(maxsplit=1)[1].strip()
                 chat = int(chat) if chat.lstrip("-").isdigit() else chat
             info = await api("getChat", {"chat_id": chat})
-            if info["type"] != "channel":
-                raise ValueError("Faqat kanallarni ulash mumkin.")
+            if info["type"] == "group":
+                raise ValueError("Bu oddiy guruh. Telegram bot orqali admin tayinlash superguruhda ishlaydi. Guruhni superguruhga o‘tkazgach, uni qayta tanlang.")
+            if info["type"] not in {"channel", "supergroup"}:
+                raise ValueError("Kanal yoki superguruhni tanlang.")
+            is_group = info["type"] == "supergroup"
+            available_rights = GROUP_RIGHTS if is_group else RIGHTS
+            basic_rights = ("can_delete_messages", "can_pin_messages") if is_group else RIGHTS[:2]
+            basic_label = "Xabar o‘chirish va mahkamlash" if is_group else "Post joylash va tahrirlash"
             chat = info["id"]
             actual = await api("getChatMember", {"chat_id": chat, "user_id": owner})
             if actual["status"] != "creator":
-                raise ValueError("Kanalni faqat uning hozirgi egasi ulashi mumkin.")
+                raise ValueError("Kanal yoki guruhni faqat uning hozirgi egasi ulashi mumkin.")
             member = await eligibility(chat, owner)
             if not data:
                 await tell(owner, "Tiklanganda qaytariladigan huquqlarni tanlang.", [
-                    [{"text": "Post joylash va tahrirlash", "callback_data": f"recover:basic:{chat}"}],
+                    [{"text": basic_label, "callback_data": f"recover:basic:{chat}"}],
                     [{"text": "Botdagi barcha admin huquqlari", "callback_data": f"recover:full:{chat}"}]])
                 return True
             if mode not in {"basic", "full"}:
                 return True
-            rights = [k for k in (RIGHTS if mode == "full" else RIGHTS[:2]) if member.get(k)]
+            rights = [k for k in (available_rights if mode == "full" else basic_rights) if member.get(k)]
             if not rights:
-                raise ValueError("Botga post joylash huquqini ham bering.")
+                raise ValueError("Botga tanlangan boshqaruv huquqlarini ham bering.")
             code = secrets.token_urlsafe(24)
             digest = hashlib.sha256(code.encode()).hexdigest()
-            await tell(owner, f"🔐 Tiklash kodingiz\n{code}\n\nKanal ID\n{chat}\n\nKodni ishonchli joyga saqlang. Tiklash shu Telegram akkauntiga bog‘langan. Kanal butunlay o‘chirilsa tiklash ishlamaydi.")
+            await tell(owner, f"🔐 Tiklash kodingiz\n{code}\n\nKanal/guruh ID\n{chat}\n\nKodni ishonchli joyga saqlang. Tiklash shu Telegram akkauntiga bog‘langan. Kanal yoki guruh butunlay o‘chirilsa tiklash ishlamaydi.")
             db([("INSERT INTO qalqon_recovery(chat,owner,title,digest,rights) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(chat) DO UPDATE SET owner=excluded.owner,title=excluded.title,digest=excluded.digest,rights=excluded.rights,enabled=TRUE,failures=0,locked_until=0,invite=NULL,expires=0", (chat,owner,info["title"],digest,json.dumps(rights)))])
             log(chat, owner, "registered")
             db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s", (owner,))])
-            await tell(owner, "✅ Kanalga qaytish sozlandi. Qaytish kerak bo‘lsa, «Kanallarim»dan kanalni tanlab kodingizni yuboring.", [[{"text": "Kanallarim", "callback_data": "recovery:list"}]])
+            await tell(owner, "✅ Kanalga qaytish sozlandi. Qaytish kerak bo‘lsa, «Kanallarim va guruhlarim»dan suhbatni tanlab kodingizni yuboring.", [[{"text": "Kanallarim va guruhlarim", "callback_data": "recovery:list"}]])
             return True
         parts = text.split()
         if len(parts) != 3:
@@ -153,10 +163,10 @@ async def handle_core(update, api, db):
         member = await eligibility(chat, owner)
         current = await api("getChatMember", {"chat_id": chat, "user_id": owner})
         if current["status"] == "creator":
-            await tell(owner, "Siz kanal egasisiz. Adminlikni tiklash talab qilinmaydi.")
+            await tell(owner, "Siz bu suhbat egasisiz. Adminlikni tiklash talab qilinmaydi.")
             return True
         if current["status"] == "kicked":
-            raise ValueError("Kanalda bloklangansiz. Hozirgi kanal boshqaruvchisi blokni olib tashlashi kerak.")
+            raise ValueError("Bu suhbatda bloklangansiz. Hozirgi boshqaruvchi blokni olib tashlashi kerak.")
         if current["status"] in {"member", "administrator"}:
             granted = {key: True for key in json.loads(rights) if member.get(key)}
             await api("promoteChatMember", {"chat_id": chat, "user_id": owner, **granted})
@@ -169,9 +179,9 @@ async def handle_core(update, api, db):
             db([("UPDATE qalqon_recovery SET invite=%s,expires=%s,failures=0,locked_until=0 WHERE chat=%s AND owner=%s", (link["invite_link"],expires,chat,owner))])
             log(chat, owner, "invite_created")
             db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s", (owner,))])
-            await tell(owner, "Havola 10 daqiqa amal qiladi. Kanalga kirish so‘rovini yuboring.", [[{"text":"Kanalga qaytish","url":link["invite_link"]}]])
+            await tell(owner, "Havola 10 daqiqa amal qiladi. Kirish so‘rovini yuboring.", [[{"text":"Qayta kirish","url":link["invite_link"]}]])
     except ValueError as exc:
-        await tell(owner, str(exc) if not str(exc).startswith("invalid literal") else "Kanal ID raqam bo‘lishi kerak.")
+        await tell(owner, str(exc) if not str(exc).startswith("invalid literal") else "Kanal/guruh ID raqam bo‘lishi kerak.")
     except KeyError:
         await tell(owner, "Telegram javobi yetarli emas. Qayta urining.")
     return True
@@ -187,7 +197,7 @@ async def handle(update, api, db):
     owner = (message.get("from") or query.get("from") or {}).get("id")
     if query and query.get("message", {}).get("chat", {}).get("id") != owner:
         return False
-    relevant = text in {BUTTON, "/kanal", "/tiklash"} or data.startswith("recovery:")
+    relevant = text in {BUTTON, LEGACY_BUTTON, "/kanal", "/tiklash"} or data.startswith("recovery:")
     dialog = []
     if db and private and owner:
         db(SCHEMA)
@@ -198,7 +208,7 @@ async def handle(update, api, db):
             return await handle_core(update, api, db)
         except RuntimeError:
             if owner and (text.startswith(("/kanal", "/tiklash")) or data.startswith("recover:")):
-                await api("sendMessage", {"chat_id": owner, "text": "Telegram amalni bajarmadi. Bot kanalda admin ekanini va admin qo‘shish huquqini tekshiring. Kanalni qayta tanlab urining."})
+                await api("sendMessage", {"chat_id": owner, "text": "Telegram amalni bajarmadi. Bot kanal yoki guruhda admin ekanini va admin qo‘shish huquqini tekshiring. Kanal yoki guruhni qayta tanlab urining."})
                 return True
             raise
 
@@ -221,21 +231,24 @@ async def handle(update, api, db):
             await send("Baza bilan ulanish vaqtincha uzilgan. Keyinroq qayta urining.")
             return True
         db(SCHEMA)
-        if text == BUTTON or text in {"/kanal", "/tiklash"} or data == "recovery:home" or text == "❌ Bekor qilish":
+        if text in {BUTTON, LEGACY_BUTTON} or text in {"/kanal", "/tiklash"} or data == "recovery:home" or text == "❌ Bekor qilish":
             db([("DELETE FROM qalqon_recovery_dialog WHERE owner=%s", (owner,))])
-            await send("🔑 Kanalga qaytish\n\nAvval kanalingizni ulang va berilgan maxfiy kodni saqlang. Keyinchalik shu akkaunt orqali kanalga qaytishingiz mumkin.", [
-                [{"text":"➕ Kanalni ulash","callback_data":"recovery:add"}],
-                [{"text":"📋 Kanallarim","callback_data":"recovery:list"}]])
+            await send("🔑 Kanal yoki guruhga qaytish\n\nAvval kanal yoki guruhingizni ulang va berilgan maxfiy kodni saqlang. Keyinchalik shu akkaunt orqali qayta kirishingiz mumkin.", [
+                [{"text":"➕ Kanal / guruhni ulash","callback_data":"recovery:add"}],
+                [{"text":"📋 Kanallarim va guruhlarim","callback_data":"recovery:list"}]])
             return True
         if data == "recovery:add":
             stage("channel")
-            await send("1. Qalqon botni kanalingizga admin qiling.\n2. «Administrator qo‘shish» va «Taklif qilish» huquqlarini yoqing.\n3. Pastdagi tugmadan kanalingizni tanlang.\n\nYoki kanal havolasini yuboring, yoxud kanaldagi postni shu yerga forward qiling.", keyboard={
-                "keyboard":[[{"text":"📢 Kanalni tanlash","request_chat":{"request_id":7351,"chat_is_channel":True,"chat_is_created":True,"request_title":True}}],["❌ Bekor qilish"]],
+            await send("1. Qalqon botni kanal yoki guruhingizga admin qiling.\n2. «Administrator qo‘shish» va «Taklif qilish» huquqlarini yoqing.\n3. Pastdagi tugmadan kanal yoki guruhingizni tanlang.\n\nYoki kanal havolasini yuboring, yoxud kanaldagi postni shu yerga forward qiling.", keyboard={
+                "keyboard":[
+                    [{"text":"📢 Kanalni tanlash","request_chat":{"request_id":7351,"chat_is_channel":True,"chat_is_created":True,"request_title":True}}],
+                    [{"text":"👥 Guruhni tanlash","request_chat":{"request_id":7352,"chat_is_channel":False,"chat_is_created":True,"request_title":True}}],
+                    ["❌ Bekor qilish"]],
                 "resize_keyboard":True,"one_time_keyboard":True})
             return True
         if data == "recovery:list":
             rows = db([("SELECT chat,title,enabled FROM qalqon_recovery WHERE owner=%s ORDER BY chat LIMIT 40",(owner,))])
-            await send("Qaytmoqchi bo‘lgan kanalingizni tanlang." if rows else "Hali kanal ulanmagan. «Kanalni ulash» tugmasini bosing.",
+            await send("Qaytmoqchi bo‘lgan kanal yoki guruhingizni tanlang." if rows else "Hali kanal yoki guruh ulanmagan. Ulash tugmasini bosing.",
                        [[{"text": title[:40] + (" · bekor qilingan" if not enabled else ""), "callback_data":f"recovery:pick:{chat}"}] for chat,title,enabled in rows] + back)
             return True
         if data.startswith("recovery:pick:"):
@@ -256,7 +269,7 @@ async def handle(update, api, db):
                 shared = message.get("chat_shared") or {}
                 origin = message.get("forward_origin") or {}
                 forwarded = origin.get("chat") if origin.get("type") == "channel" else message.get("forward_from_chat")
-                channel = shared.get("chat_id") if shared.get("request_id") == 7351 else None
+                channel = shared.get("chat_id") if shared.get("request_id") in {7351,7352} else None
                 channel = channel or (forwarded or {}).get("id")
                 if not channel:
                     channel = text
@@ -264,7 +277,7 @@ async def handle(update, api, db):
                         path = urlsplit(text if "://" in text else "https://"+text).path.strip("/").split("/")[0]
                         channel = "@"+path
                     if not (str(channel).startswith("@") or str(channel).lstrip("-").isdigit()):
-                        await send("Kanalni tugma orqali tanlang yoki kanaldagi postni forward qiling. Masalan, @kanal_nomi ham yuborishingiz mumkin.",back)
+                        await send("Kanal yoki guruhni pastdagi tanlash tugmasidan tanlang. Masalan, @kanal_nomi ham yuborishingiz mumkin.",back)
                         return True
                 translated = dict(message,text=f"/kanal {channel}")
             else:
@@ -276,5 +289,5 @@ async def handle(update, api, db):
         await send("Kanal ma’lumoti noto‘g‘ri. Qayta tanlang.",back)
     except RuntimeError:
         logging.getLogger("telegram_himoya").warning("Channel recovery operation failed")
-        await send("Telegram yoki baza so‘rovni bajarmadi. Bot kanalda admin ekanini va kerakli huquqlarini tekshiring, keyin qayta urining.",back)
+        await send("Telegram yoki baza so‘rovni bajarmadi. Bot kanal yoki guruhda admin ekanini va kerakli huquqlarini tekshiring, keyin qayta urining.",back)
     return True
