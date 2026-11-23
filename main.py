@@ -8,7 +8,6 @@ temporary upload file with explicit consent. Opt-in history stores text and medi
 from __future__ import annotations
 
 import asyncio
-import hmac
 import hashlib
 import io
 import struct
@@ -24,7 +23,7 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -2290,121 +2289,6 @@ async def run_polling(session: aiohttp.ClientSession, store: Store) -> None:
             await asyncio.sleep(3)
 
 
-def miniapp_owner(raw: str) -> int:
-    if not BOT_TOKEN or not isinstance(raw, str) or len(raw) > 16000:
-        raise ValueError
-    pairs = parse_qsl(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=30)
-    fields = dict(pairs)
-    signature = fields.pop("hash", "")
-    if not re.fullmatch("[a-f0-9]{64}", signature) or len(fields) + 1 != len(pairs):
-        raise ValueError
-    key = hmac.digest(b"WebAppData", BOT_TOKEN.encode(), "sha256")
-    check = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
-    if not hmac.compare_digest(hmac.new(key, check.encode(), hashlib.sha256).hexdigest(), signature):
-        raise ValueError
-    if not -30 <= time.time() - int(fields["auth_date"]) <= 3600:
-        raise ValueError
-    owner = json.loads(fields["user"])["id"]
-    if type(owner) is not int or owner <= 0:
-        raise ValueError
-    return owner
-
-
-def miniapp_chat_row(row):
-    media = row.get("media") or {}
-    kind = media.get("kind")
-    return {"chat": str(row["chat_id"]), "name": row["sender"], "text": row["text"],
-            "sent": row.get("sent_at"), "deleted": row.get("deleted_at"),
-            "automatic": bool(row.get("automatic")), "kind": kind, "emoji": media.get("emoji"),
-            "preview": row["token"] if kind in {"photo", "sticker"} else None}
-
-
-async def history_preview(session, item):
-    media = (item or {}).get("media") or {}
-    if media.get("kind") not in {"photo", "sticker"}:
-        raise web.HTTPNotFound()
-    limit = 5 * 1024 * 1024
-    try:
-        meta = await api(session, "getFile", {"file_id": media.get("preview") or media["file_id"]})
-        path = meta.get("file_path", "")
-        if not re.fullmatch(r"[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+", path) or meta.get("file_size", 0) > limit:
-            raise web.HTTPNotFound()
-        async with session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}",
-                               allow_redirects=False, timeout=aiohttp.ClientTimeout(total=15)) as res:
-            if res.status != 200:
-                raise web.HTTPNotFound()
-            data = bytearray()
-            async for chunk in res.content.iter_chunked(65536):
-                if len(data) + len(chunk) > limit:
-                    raise web.HTTPRequestEntityTooLarge(max_size=limit, actual_size=len(data)+len(chunk))
-                data.extend(chunk)
-        if data.startswith(bytes.fromhex("ffd8ff")):
-            mime = "image/jpeg"
-        elif data[:8] == bytes.fromhex("89504e470d0a1a0a"):
-            mime = "image/png"
-        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            mime = "image/webp"
-        else:
-            raise web.HTTPNotFound()
-        return web.Response(body=bytes(data), content_type=mime)
-    except (aiohttp.ClientError, asyncio.TimeoutError, TelegramAPIError):
-        raise web.HTTPServiceUnavailable() from None
-
-
-def register_miniapp(app, session, store):
-    media_limit = InteractionLimiter(capacity=180)
-    media_slots = asyncio.Semaphore(4)
-    async def page(request):
-        return web.FileResponse(Path(__file__).with_name("miniapp.html"), headers={
-            "Content-Type": "text/html; charset=utf-8",
-            "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline' https://telegram.org; style-src 'unsafe-inline'; connect-src 'self'; img-src blob:; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'none'; form-action 'none'",
-        })
-
-    async def endpoint(request):
-        try:
-            owner = miniapp_owner(request.headers.get("X-Telegram-Init-Data", ""))
-        except (KeyError, TypeError, ValueError):
-            return web.json_response({"error": "Ilovani Telegram botidan qayta oching."}, status=401)
-        is_media = "token" in request.match_info
-        limiter = media_limit if is_media else PRIVATE_LIMITER
-        if not limiter.allow(("miniapp", owner)):
-            return web.json_response({"error": "Bir oz kutib qayta urining."}, status=429)
-        if await subscription_state(session, owner) != "member":
-            return web.json_response({"error": "Botdagi kanal obunasini tasdiqlang."}, status=403)
-        readers = {"auto": store.auto_delete_enabled, "warning": store.outgoing_warning_enabled, "history": store.history_enabled}
-        setters = {"auto": store.set_auto_delete, "warning": store.set_outgoing_warning, "history": store.set_history}
-        try:
-            if is_media:
-                if not store.history_enabled(owner):
-                    raise web.HTTPNotFound()
-                async with media_slots:
-                    item = DELETED_HISTORY.detail(owner, request.match_info["token"])
-                    return await history_preview(session, item)
-            if request.method == "PUT":
-                body = await request.json()
-                if not isinstance(body, dict) or body.get("key") not in tuple(setters) or type(body.get("enabled")) is not bool:
-                    raise ValueError
-                key, enabled = body["key"], body["enabled"]
-                setters[key](owner, enabled)
-                if key == "history" and not enabled:
-                    DELETED_HISTORY.clear(owner)
-            if request.path.endswith("/history"):
-                rows = DELETED_HISTORY.deleted(owner) if store.history_enabled(owner) else []
-                return web.json_response({"messages": [miniapp_chat_row(row) for row in rows]})
-            return web.json_response({"connected": bool(store.active_connection_id(owner)),
-                                      "settings": {key: reader(owner) for key, reader in readers.items()}})
-        except (TypeError, ValueError):
-            return web.json_response({"error": "So‘rov noto‘g‘ri."}, status=400)
-        except (sqlite3.Error, TelegramAPIError):
-            return web.json_response({"error": "Ma’lumotlar vaqtincha mavjud emas."}, status=503)
-
-    app.router.add_get("/miniapp", page)
-    app.router.add_get("/miniapp/state", endpoint)
-    app.router.add_put("/miniapp/state", endpoint)
-    app.router.add_get("/miniapp/history", endpoint)
-    app.router.add_get("/miniapp/media/{token}", endpoint)
-
-
 def create_webhook_app(
     session: aiohttp.ClientSession, store: Store, secret: str,
 ) -> web.Application:
@@ -2477,7 +2361,6 @@ def create_webhook_app(
     app.on_response_prepare.append(secure_response)
     app.router.add_get("/", health)
     app.router.add_get("/healthz", health)
-    register_miniapp(app, session, store)
     app.router.add_post(WEBHOOK_PATH, webhook)
     return app
 
@@ -2488,7 +2371,6 @@ async def run_webhook(session: aiohttp.ClientSession, store: Store) -> None:
     parsed = urlsplit(external_url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
         raise SystemExit("Webhook uchun RENDER_EXTERNAL_URL to‘g‘ri HTTPS manzil bo‘lishi kerak")
-    MENU_LAUNCHER["inline_keyboard"].insert(0, [{"text": "🛡 Ilovani ochish", "web_app": {"url": external_url + "/miniapp"}}])
     app = create_webhook_app(session, store, secret)
     runner = web.AppRunner(
         app, access_log=None, auto_decompress=False, keepalive_timeout=15,
