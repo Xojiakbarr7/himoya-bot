@@ -66,6 +66,33 @@ class PassiveScannerTests(unittest.TestCase):
         self.assertGreaterEqual(result["score"], 90)
         self.assertTrue(any("Phishing.Database" in reason for reason in result["reasons"]))
 
+    def test_disguised_link_uses_utf16_offsets_and_real_destination(self):
+        label = "https://telegram.org"
+        text = "👋 " + label
+        message = {"text": text, "entities": [{"type": "text_link", "offset": 3,
+                   "length": len(label), "url": "https://evil.example/login"}]}
+        result = main.analyze(message)
+        self.assertEqual(result["level"], "SHUBHALI")
+        self.assertTrue(any("domenidan farq qiladi" in reason for reason in result["reasons"]))
+        self.assertTrue(any(link["host"] == "evil.example" for link in result["links"]))
+        self.assertEqual(main.business_outgoing_warning_reason(message, result), "shubhali havola")
+
+    def test_disguised_caption_and_userinfo_are_flagged(self):
+        label = "https://safe.example"
+        message = {"caption": label, "caption_entities": [{"type": "text_link", "offset": 0,
+                   "length": len(label), "url": "https://evil.example"}]}
+        self.assertTrue(any("domenidan farq qiladi" in r for r in main.analyze(message)["reasons"]))
+        score, reasons, host = main.inspect_url("https://telegram.org@evil.example/login")
+        self.assertGreaterEqual(score, 35)
+        self.assertEqual(host, "evil.example")
+        self.assertTrue(any("@" in reason for reason in reasons))
+
+    def test_matching_or_non_url_labels_are_not_marked_disguised(self):
+        for label in ("https://example.com", "Bu yerga bosing"):
+            message = {"text": label, "entities": [{"type": "text_link", "offset": 0,
+                       "length": len(label), "url": "https://example.com"}]}
+            self.assertFalse(any("domenidan farq qiladi" in r for r in main.analyze(message)["reasons"]))
+
     def test_plain_manifest_and_hash(self):
         data = apk(b'<manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.READ_SMS"/></manifest>')
         result = inspect_apk(data)

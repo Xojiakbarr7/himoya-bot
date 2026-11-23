@@ -710,6 +710,12 @@ def inspect_url(url: str) -> tuple[int, list[str], str]:
     score = 0
     if not host:
         return 55, ["Havola manzilini to‘g‘ri aniqlab bo‘lmadi"], "noma’lum domen"
+    try:
+        if urlsplit(url if "://" in url else f"https://{url}").username is not None:
+            score += 45
+            reasons.append("Havolada @ belgisi bor: haqiqiy domen undan keyin keladi")
+    except ValueError:
+        pass
     if host.startswith("xn--") or ".xn--" in host:
         score += 45
         reasons.append("Domen xalqaro/punycode yozuvidan foydalanadi")
@@ -751,9 +757,30 @@ def analyze(message: dict[str, Any]) -> dict[str, Any] | None:
         score = min(100, score + 35)
         reasons.append("Xabarda kod, parol, pul yoki akkauntni shoshilinch tasdiqlashga undovchi ibora bor")
 
+    # Telegram can display one domain while the text_link opens another.
+    # Compare only labels that visibly contain a URL, and never open either site.
+    disguised_urls = set()
+    for text_key, entity_key in (("text", "entities"), ("caption", "caption_entities")):
+        encoded = (message.get(text_key) or "").encode("utf-16-le")
+        for entity in message.get(entity_key) or []:
+            if entity.get("type") != "text_link" or not entity.get("url"):
+                continue
+            start = int(entity.get("offset", 0)) * 2
+            end = start + int(entity.get("length", 0)) * 2
+            label = encoded[start:end].decode("utf-16-le", errors="ignore")
+            target = str(entity["url"]).rstrip(TRAILING_URL_PUNCTUATION)
+            target_host = host_from_url(target)
+            for visible in URL_RE.findall(label):
+                visible_host = host_from_url(visible.rstrip(TRAILING_URL_PUNCTUATION))
+                if visible_host and target_host and visible_host != target_host:
+                    disguised_urls.add(target)
+
     link_results = []
     for url in urls_from_message(message):
         link_score, link_reasons, host = inspect_url(url)
+        if url in disguised_urls:
+            link_score = min(100, link_score + 50)
+            link_reasons.append("Ko‘rsatilgan havola domeni haqiqiy manzil domenidan farq qiladi")
         link_results.append({"host": host, "score": link_score, "reasons": link_reasons})
         if link_score:
             score = min(100, score + link_score)
