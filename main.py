@@ -8,6 +8,7 @@ temporary upload file with explicit consent. Opt-in history stores text and medi
 from __future__ import annotations
 
 import asyncio
+import channel_recovery
 import hashlib
 import io
 import struct
@@ -76,7 +77,7 @@ MAIN_KEYBOARD = {
         [BUTTON_SCAN, BUTTON_STATUS],
         [BUTTON_HISTORY, BUTTON_SECURITY_CENTER],
         [BUTTON_DELETE_MODE, BUTTON_OUTGOING_WARNING],
-        [BUTTON_TIPS],
+        [BUTTON_TIPS, channel_recovery.BUTTON],
         [BUTTON_HELP, "✖️ Menyuni yopish"],
     ],
     "resize_keyboard": True,
@@ -87,7 +88,7 @@ MAIN_KEYBOARD = {
 }
 MENU_LAUNCHER = {"inline_keyboard": [[{"text": "☰ Menyuni ochish", "callback_data": "menu:open"}], [{"text": "🎬 Video qo‘llanma", "callback_data": "guide:watch"}]]}
 ALLOWED_UPDATES = [
-    "message", "business_connection", "business_message",
+    "message", "business_connection", "business_message", "chat_join_request", "my_chat_member",
     "edited_business_message", "edited_message", "callback_query", "deleted_business_messages",
 ]
 
@@ -1907,6 +1908,10 @@ async def delete_incoming_business_message(
 
 
 async def process_update(session: aiohttp.ClientSession, store: Store, update: dict[str, Any]) -> None:
+    backend = DELETED_HISTORY if isinstance(DELETED_HISTORY, PostgresMessageHistory) else None
+    if await channel_recovery.handle(update, lambda method, payload: api(session, method, payload),
+                                     backend._execute if backend else None):
+        return
     if "deleted_business_messages" in update:
         await handle_business_deletions(session, store, update["deleted_business_messages"])
         return
@@ -2177,6 +2182,12 @@ def validate_update(update: Any) -> None:
         return  # Acknowledge unused Telegram update kinds without acting on them.
     kind = kinds[0]
     value = obj(update[kind])
+    if kind in {"chat_join_request", "my_chat_member"}:
+        user(value.get("from"))
+        chat = obj(value.get("chat"))
+        if not integer(chat.get("id")) or chat.get("type") not in {"channel", "supergroup", "group"}:
+            raise ValueError("Invalid membership chat")
+        return
     if kind == "business_connection":
         string(value.get("id"), 256)
         return  # Routing and ownership are fetched from Telegram, not this payload.
