@@ -4,16 +4,23 @@ import logging
 
 import aiohttp
 
-CAMPAIGN = "channel_recovery_2026_11_23"
-TEXT = """🎉 Qalqon AI’da yangi imkoniyat — Kanalga qaytish!
+CAMPAIGN = "backup_key_announcement_2026_11_23"
+TEXT = """🔐 Qalqon AI’da yangi imkoniyat — zaxira kalit!
 
-🔑 Kanalingizni oldindan botga ulang va maxfiy tiklash kodini saqlang. Keyinchalik kanaldan chiqib ketsangiz, shu akkaunt orqali qaytib, tanlangan admin huquqlarini tiklashingiz mumkin.
+Telegram akkauntingiz o‘chib qolsa ham, oldindan yaratilgan kalit yordamida boshqa akkauntdan kanal yoki guruhga qaytib, administrator huquqlarini olishga urinishingiz mumkin.
 
-Boshlash uchun pastdagi «Kanalni ulash» tugmasini bosing. Bot sizga bosqichma-bosqich yordam beradi.
+Qanday yoqiladi?
+1️⃣ Botda «🔑 Kanal / guruhga qaytish» bo‘limini oching.
+2️⃣ Kanal yoki guruhingizni ulang va ro‘yxatdan tanlang.
+3️⃣ «🔐 Zaxira kalit yaratish»ni bosing va QALQON_ bilan boshlanadigan kalitni xavfsiz joyga saqlang.
 
-⚠️ Kanal mavjud bo‘lishi va botda kerakli admin huquqlari saqlanishi kerak. Butunlay o‘chirilgan kanalni tiklash imkoni yo‘q. Kanal boshqa egaga topshirilsa, oldingi tiklash ruxsati bekor qilinadi.
+Yangi akkauntda botni ochib, «Zaxira kalit bilan kirish»ni bosing va kalitni yuboring.
 
-✅ Funksiyadan foydalanish bepul."""
+⚠️ Kalitni akkaunt o‘chishidan oldin yarating. Uni hech kimga bermang: kalitni bilgan odam admin bo‘lishi mumkin. Bot kanal yoki guruhda kerakli admin huquqlari bilan qolishi kerak.
+
+Bot egasi maqomini yoki butunlay o‘chirilgan kanal va guruhni tiklay olmaydi. Tiklash Telegram ruxsatlariga bog‘liq.
+
+🆓 Foydalanish bepul!"""
 log = logging.getLogger("telegram_himoya")
 
 
@@ -39,8 +46,9 @@ async def run(session, api_base, execute):
             break
         owner = rows[0][0]
         payload = {"chat_id":owner,"text":TEXT,"reply_markup":{"inline_keyboard":[
-            [{"text":"🔑 Kanalni ulash","callback_data":"recovery:add"}],
-            [{"text":"📋 Kanallarim","callback_data":"recovery:list"}]]}}
+            [{"text":"🔑 Kanal / guruhni ulash","callback_data":"recovery:add"}],
+            [{"text":"📋 Kanallarim va guruhlarim","callback_data":"recovery:list"}],
+            [{"text":"🔐 Zaxira kalit bilan kirish","callback_data":"backup:enter"}]]}}
         status = "unknown"
         for attempt in range(5):
             try:
@@ -66,7 +74,7 @@ async def run(session, api_base, execute):
 
 
 async def publish_channel(session, api_base, db):
-    campaign = "channel_recovery_public_2026_11_23"
+    campaign = "backup_key_public_2026_11_23"
     existing = await db([("SELECT 1 FROM qalqon_announcements WHERE campaign=%s", (campaign,))])
     if existing:
         return
@@ -82,8 +90,7 @@ async def publish_channel(session, api_base, db):
     claimed = await db([("INSERT INTO qalqon_announcements VALUES(%s) ON CONFLICT DO NOTHING RETURNING campaign", (campaign,))])
     if not claimed:
         return
-    body = TEXT.replace("Boshlash uchun pastdagi «Kanalni ulash» tugmasini bosing. Bot sizga bosqichma-bosqich yordam beradi.",
-                        "Boshlash uchun pastdagi tugma orqali botga kiring. Menyudan «🔑 Kanalga qaytish» → «➕ Kanalni ulash»ni tanlang. Bot sizga bosqichma-bosqich yordam beradi.")
+    body = TEXT
     payload = {"chat_id":chat["id"], "text":body, "reply_markup":{"inline_keyboard":[
         [{"text":"🛡 Qalqon AI botini ochish", "url":"https://t.me/Qalqonn_bot"}]]}}
     try:
@@ -96,3 +103,4 @@ async def publish_channel(session, api_base, db):
             log.warning("Public recovery announcement rejected: code=%s",sent.get("error_code"))
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         log.warning("Public recovery announcement delivery uncertain; not duplicated")
+
