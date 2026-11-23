@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import channel_recovery
+import recovery_announcement
 import hashlib
 import io
 import struct
@@ -2486,6 +2487,18 @@ async def run() -> None:
             await api(session, "setChatMenuButton", {"menu_button": {"type": "commands"}})
         except TelegramAPIError:
             log.warning("Bot menyusini tiklash vaqtincha bajarilmadi")
+        async def send_recovery_announcement():
+            for attempt in range(5):
+                try:
+                    if not isinstance(DELETED_HISTORY, PostgresMessageHistory):
+                        log.warning("Recovery announcement waiting for durable database")
+                        return
+                    await recovery_announcement.run(session, API_BASE, DELETED_HISTORY._execute)
+                    return
+                except TelegramTemporaryError:
+                    log.warning("Recovery announcement database retry")
+                    await asyncio.sleep(30)
+        announcement_task = asyncio.create_task(send_recovery_announcement())
         reputation_task = asyncio.create_task(THREAT_INTEL.run(session))
         try:
             if os.environ.get("RENDER_EXTERNAL_URL"):
@@ -2494,10 +2507,11 @@ async def run() -> None:
                 await run_polling(session, store)
         finally:
             reputation_task.cancel()
+            announcement_task.cancel()
             jobs = list(APK_SCAN_JOBS)
             for job in jobs:
                 job.cancel()
-            await asyncio.gather(reputation_task, *jobs, return_exceptions=True)
+            await asyncio.gather(reputation_task, announcement_task, *jobs, return_exceptions=True)
 
 
 if __name__ == "__main__":
