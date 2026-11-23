@@ -925,20 +925,21 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
     await api(session, "sendMessage", {
         "chat_id": chat_id,
         "text": (
-            "🛡 <b>Qalqon AI — Telegram himoyasi</b>\n"
-            "APK, havola va firibgarlik belgilarini kuzatishga yordam beradi.\n\n"
-            "<b>Afzalliklari</b>\n"
-            "• Ruxsat berilgan shaxsiy chatlardagi xavf belgilarini aniqlab, sizga ogohlantirish yuboradi.\n"
-            "• <b>🗑 Avto o‘chirish sozlamasi</b> orqali APK/dastur fayllari va barcha havolali xabarlarni o‘chirishni o‘zingiz yoqasiz yoki o‘chirasiz.\n"
-            "• <b>⚠️ Yuborilgan xabar ogohlantirishi</b> orqali akkauntingizdan APK yoki shubhali havola ketsa, oluvchiga ogohlantirish yozishni yoqasiz yoki o‘chirasiz.\n"
-            "• Guruhda APK, dastur fayli va havolalarni o‘chirib, guruhga xabar beradi.\n\n"
-            "• <b>📝 O‘chirilgan xabarlar</b> — o‘zingiz yoqsangiz, kelgan xabar matnini vaqtincha eslab turib, o‘chirilganda ko‘rsatadi.\n\n"
-            "• <b>🛡 Xavfsizlik markazi</b> — ulanish va rejim holati, so‘nggi 7 kun hisoboti hamda chatlar bo‘yicha hodisalarni ko‘rsatadi. Hisobot uchun xabar matni yoki to‘liq havola saqlanmaydi.\n\n"
-            "<b>Qanday yoqiladi?</b>\n"
-            "1. Telegram <b>Sozlamalar → Telegram Business → Chatbots</b>ga kiring, Qalqon AI’ni tanlang va kerakli chatlarga ruxsat bering.\n"
-            "2. Pastdagi sozlamalardan kerakli rejimni yoqing. Avto o‘chirish uchun <b>barcha xabarlarni o‘chirish</b>, yuborilgan xabar ogohlantirishi uchun <b>Javob berish</b> huquqini bering.\n"
-            "3. Guruh himoyasi uchun botni guruhga qo‘shib, administrator qiling va <b>Delete Messages</b> huquqini bering.\n\n"
-            "⚠️ Bot to‘liq antivirus emas. Avtomatik kuzatuv fayllarni yuklab olmaydi; chuqur APK tekshiruvi faqat roziligingiz bilan bajariladi. Tarix rejimi yoqilsa matn va media identifikatori 1 kungacha saqlanadi."
+            "🛡 <b>Qalqon AI’ga xush kelibsiz!</b>\n"
+            "Telegram chatlaringiz va guruhlaringizni boshqarishga yordam beraman.\n\n"
+            "<b>Men nimalar qila olaman?</b>\n"
+            "🔍 Shubhali havola va APK haqida ogohlantirish.\n"
+            "🗑 Sozlamaga ko‘ra APK va havolali xabarlarni o‘chirish.\n"
+            "⚠️ Akkauntingizdan shubhali xabar yuborilsa, ogohlantirish yozish.\n"
+            "📝 Oldindan saqlangan o‘chirilgan xabarlarni ko‘rsatish.\n"
+            "👥 Guruhda APK va havolali xabarlarni o‘chirish.\n"
+            "🔑 Oldindan tayyorlangan kod yoki zaxira kalit bilan kanal va guruhga admin sifatida qaytishga yordam berish.\n\n"
+            "<b>Qanday boshlash kerak?</b>\n"
+            "1️⃣ Shaxsiy chatlar uchun Telegram <b>Sozlamalar → Telegram Business → Chatbotlar</b> bo‘limida Qalqon AI’ni ulang va kerakli ruxsatlarni bering.\n"
+            "2️⃣ Guruh himoyasi uchun botni guruhga qo‘shib, xabarlarni o‘chirish huquqiga ega admin qiling.\n"
+            "3️⃣ Kanal yoki guruhga qaytish uchun uni oldindan ulang va zaxira kalitni xavfsiz saqlang.\n\n"
+            "🔒 Tarix ixtiyoriy: yoqilganda xabar matni va media identifikatori bazada saqlanadi; ularni bot ilova darajasida shifrlamaydi. Batafsil: «O‘chirilgan xabarlar».\n\n"
+            "ℹ️ Bot to‘liq antivirus emas; ayrim funksiyalar Telegram ruxsatlari va cheklovlariga bog‘liq."
         ),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
