@@ -981,7 +981,7 @@ async def handle_protected_media_share(session: aiohttp.ClientSession, message: 
             "🖼 <b>Rasm yoki videoni himoyali yuborish</b>\n\n"
             "Rasm/video tanlang va izohiga quyidagicha yozing: <code>/protect 123456789</code>\n"
             "123456789 o‘rniga qabul qiluvchining Telegram ID raqamini kiriting. "
-            "Qabul qiluvchi avval botni ochib /start bosgan bo‘lishi kerak.")
+            "Qabul qiluvchi botda /start bosib, /id orqali ID raqamini olsin.")
         return True
 
     if not (message.get("photo") or isinstance(message.get("video"), dict)):
@@ -1496,6 +1496,8 @@ async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]
         await send_text(session, chat_id,
             "Rasm/video tanlang va izohiga <code>/protect 123456789</code> yozing. "
             "Qabul qiluvchi botni avval /start bilan ochgan bo‘lishi kerak.")
+    elif command == "/id":
+        await send_text(session, chat_id, f"🆔 Telegram ID raqamingiz: <code>{chat_id}</code>")
     elif command == "/status":
         await handle_status(session, chat_id)
     elif command == "/tips":
@@ -1580,7 +1582,7 @@ async def handle_keyboard_button(
         await send_text(session, chat_id,
             "🖼 <b>Rasm yoki videoni himoyali yuborish</b>\n\n"
             "Rasm/video tanlang va izohiga <code>/protect 123456789</code> yozing. "
-            "Qabul qiluvchining ID raqamini qo‘ying; u avval botga /start yuborgan bo‘lishi kerak.")
+            "Qabul qiluvchining ID raqamini qo‘ying; u botda /start bosib, /id orqali ID raqamini olsin.")
     elif text == "✖️ Menyuni yopish":
         await api(session, "sendMessage", {"chat_id": chat_id, "text": "Menyu yopildi.", "reply_markup": {"remove_keyboard": True}})
         await send_text(session, chat_id, "Kerak bo‘lsa menyuni qayta oching.")
