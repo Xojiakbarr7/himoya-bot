@@ -934,6 +934,7 @@ async def handle_start(session: aiohttp.ClientSession, chat_id: int) -> None:
             "🗑 Sozlamaga ko‘ra APK va havolali xabarlarni o‘chirish.\n"
             "⚠️ Akkauntingizdan shubhali xabar yuborilsa, ogohlantirish yozish.\n"
             "📝 Oldindan saqlangan o‘chirilgan xabarlarni ko‘rsatish.\n"
+            "🖼 Rasm yoki videoni Telegram ID orqali himoyali yuborish.\n"
             "👥 Guruhda APK va havolali xabarlarni o‘chirish.\n"
             "🔑 Oldindan tayyorlangan kod yoki zaxira kalit bilan kanal va guruhga admin sifatida qaytishga yordam berish.\n\n"
             "<b>Qanday boshlash kerak?</b>\n"
@@ -1583,6 +1584,7 @@ async def handle_keyboard_button(
             "🖼 <b>Rasm yoki videoni himoyali yuborish</b>\n\n"
             "Rasm/video tanlang va izohiga <code>/protect 123456789</code> yozing. "
             "Qabul qiluvchining ID raqamini qo‘ying; u botda /start bosib, /id orqali ID raqamini olsin.")
+        return True
     elif text == "✖️ Menyuni yopish":
         await api(session, "sendMessage", {"chat_id": chat_id, "text": "Menyu yopildi.", "reply_markup": {"remove_keyboard": True}})
         await send_text(session, chat_id, "Kerak bo‘lsa menyuni qayta oching.")
