@@ -1473,7 +1473,8 @@ async def send_video_guide(session, store, owner):
         await send_text(session, owner, "🎬 Video qo‘llanma tayyorlanmoqda. Hozircha ℹ️ /help orqali yozma qo‘llanmani oching.")
         return
     await api(session, "sendVideo", {"chat_id": owner, "video": record["file_id"], "supports_streaming": True,
-        "caption": "🛡 Qalqon AI — video qo‘llanma\n\nBotni ulash va undan foydalanishni videoda ko‘ring.", "reply_markup": MENU_LAUNCHER})
+        "caption": "🛡 Qalqon AI — video qo‘llanma\n\nBotni ulash va undan foydalanishni videoda ko‘ring.",
+        "protect_content": True, "reply_markup": MENU_LAUNCHER})
 
 async def accept_video_guide(session, store, message):
     caption = str(message.get("caption") or "")
