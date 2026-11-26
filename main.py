@@ -972,11 +972,8 @@ async def start_protected_media_share(session: aiohttp.ClientSession, chat_id: i
         "expires": time.monotonic() + PROTECTED_SHARE_TTL,
     }
     await send_text(session, chat_id,
-        "🖼 <b>Himoyali yuborish</b> (5 daqiqa)
-
-"
-        "Avval qabul qiluvchining Telegram ID raqamini yuboring. U botni /start bilan ochib, /id orqali ID sini oladi.
-"
+        "🖼 <b>Himoyali yuborish</b> (5 daqiqa)\n\n"
+        "Avval qabul qiluvchining Telegram ID raqamini yuboring. U botni /start bilan ochib, /id orqali ID sini oladi.\n"
         "Bekor qilish: /cancel")
 
 
@@ -1035,10 +1032,7 @@ async def handle_protected_media_share(session: aiohttp.ClientSession, message: 
         if recipient_text is None:
             await start_protected_media_share(session, chat_id)
             return True
-        try:
-            recipient_id = int(recipient_text)
-        except ValueError:
-            recipient_id = 0
+        recipient_id = int(recipient_text)
         if not (0 < recipient_id < 2**52):
             await send_text(session, chat_id, "Telegram ID noto‘g‘ri. Raqamni tekshiring.")
             return True
@@ -1054,7 +1048,8 @@ async def handle_protected_media_share(session: aiohttp.ClientSession, message: 
 
     if not state:
         return False
-    if raw.split(maxsplit=1)[0].split("@", 1)[0].lower() == "/cancel" if raw else False:
+    is_cancel = raw.split(maxsplit=1)[0].split("@", 1)[0].lower() == "/cancel" if raw else False
+    if is_cancel:
         PROTECTED_SHARE_SESSIONS.pop(chat_id, None)
         await send_text(session, chat_id, "Himoyali yuborish bekor qilindi.")
         return True
