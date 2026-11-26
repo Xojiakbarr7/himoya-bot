@@ -1601,11 +1601,6 @@ async def handle_keyboard_button(
             "Ogohlantirish xavf belgisi borligini bildiradi; bot faylni antivirus kabi tahlil qilmaydi.")
     elif text in {BUTTON_HELP, "ℹ️ Qo‘llanma"}:
         await send_video_guide(session, store, chat_id)
-    elif text == BUTTON_PROTECTED_SEND:
-        await send_text(session, chat_id,
-            "🖼 <b>Rasm yoki videoni himoyali yuborish</b>\n\n"
-            "Rasm/video tanlang va izohiga <code>/protect 123456789</code> yozing. "
-            "Qabul qiluvchining ID raqamini qo‘ying; u avval botga /start yuborgan bo‘lishi kerak.")
     elif text == BUTTON_SCAN:
         await send_text(session, chat_id,
             "🔎 <b>Qo‘lda tekshirish</b>\n\n"
