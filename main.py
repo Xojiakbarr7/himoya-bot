@@ -146,6 +146,8 @@ PRIVATE_LIMITER = InteractionLimiter()
 SUBSCRIPTION_NOTICE_LIMITER = InteractionLimiter(capacity=1, period=600)
 APK_SCAN_LIMITER = InteractionLimiter(capacity=3, period=3600)
 APK_REQUESTS: OrderedDict[str, dict[str, Any]] = OrderedDict()
+PROTECTED_SHARE_SESSIONS: OrderedDict[int, dict[str, Any]] = OrderedDict()
+PROTECTED_SHARE_TTL = 300
 APK_SCAN_JOBS: set[asyncio.Task] = set()
 APK_SCAN_SEMAPHORE = asyncio.Semaphore(1)
 
@@ -962,64 +964,120 @@ async def send_text(session: aiohttp.ClientSession, chat_id: int, text: str) -> 
     })
 
 
-async def handle_protected_media_share(session: aiohttp.ClientSession, message: dict[str, Any]) -> bool:
-    if (message.get("chat") or {}).get("type") != "private":
-        return False
-    raw = str(message.get("text") or message.get("caption") or "").strip()
-    match = re.fullmatch(r"/protect(?:@[A-Za-z0-9_]+)?(?:\s+([0-9]{1,20}))?", raw, flags=re.IGNORECASE)
-    if not match:
-        return False
+async def start_protected_media_share(session: aiohttp.ClientSession, chat_id: int) -> None:
+    if len(PROTECTED_SHARE_SESSIONS) >= 1000 and chat_id not in PROTECTED_SHARE_SESSIONS:
+        PROTECTED_SHARE_SESSIONS.popitem(last=False)
+    PROTECTED_SHARE_SESSIONS[chat_id] = {
+        "step": "recipient",
+        "expires": time.monotonic() + PROTECTED_SHARE_TTL,
+    }
+    await send_text(session, chat_id,
+        "🖼 <b>Himoyali yuborish</b> (5 daqiqa)
 
+"
+        "Avval qabul qiluvchining Telegram ID raqamini yuboring. U botni /start bilan ochib, /id orqali ID sini oladi.
+"
+        "Bekor qilish: /cancel")
+
+
+async def _send_protected_media(
+    session: aiohttp.ClientSession, message: dict[str, Any], recipient_id: int,
+) -> bool:
     chat_id = int(message["chat"]["id"])
-    sender_id = int((message.get("from") or {}).get("id", 0))
-    if sender_id != chat_id:
-        await send_text(session, chat_id, "Himoyali yuborish faqat bot bilan shaxsiy chatda ishlaydi.")
-        return True
-
-    recipient_text = match.group(1)
-    if not recipient_text:
-        await send_text(session, chat_id,
-            "🖼 <b>Rasm yoki videoni himoyali yuborish</b>\n\n"
-            "Rasm/video tanlang va izohiga quyidagicha yozing: <code>/protect 123456789</code>\n"
-            "123456789 o‘rniga qabul qiluvchining Telegram ID raqamini kiriting. "
-            "Qabul qiluvchi botda /start bosib, /id orqali ID raqamini olsin.")
-        return True
-
     if not (message.get("photo") or isinstance(message.get("video"), dict)):
-        await send_text(session, chat_id, "Buyruqni rasm yoki videoga izoh qilib yuboring: <code>/protect 123456789</code>.")
+        await send_text(session, chat_id, "Iltimos, rasm yoki video yuboring. Bekor qilish: /cancel")
         return True
     if any(message.get(key) for key in ("has_protected_content", "paid_media", "ttl_seconds", "self_destruct_time")):
         await send_text(session, chat_id, "Bir marta ko‘riladigan yoki oldindan himoyalangan media’ni qayta yubora olmayman.")
         return True
-
-    try:
-        recipient_id = int(recipient_text)
-    except ValueError:
-        recipient_id = 0
     message_id = message.get("message_id")
-    if not 0 < recipient_id < 2**52 or type(message_id) is not int or message_id <= 0:
-        await send_text(session, chat_id, "Telegram ID yoki xabar raqami noto‘g‘ri. ID faqat raqamlardan iborat bo‘lsin.")
+    if not (0 < recipient_id < 2**52) or type(message_id) is not int or message_id <= 0:
+        await send_text(session, chat_id, "ID yoki xabar raqami noto‘g‘ri. Qabul qiluvchining /id orqali olgan ID sini kiriting.")
         return True
-
     try:
         await api(session, "copyMessage", {
             "chat_id": recipient_id,
             "from_chat_id": chat_id,
             "message_id": message_id,
-            "caption": "",
             "protect_content": True,
         })
     except TelegramAPIError as exc:
         if isinstance(exc, TelegramTemporaryError):
             raise
         await send_text(session, chat_id,
-            "Yuborilmadi. Qabul qiluvchi botni ochib /start bosganini, ID to‘g‘riligini va botni bloklamaganini tekshiring.")
+            "Yuborilmadi. Qabul qiluvchi botda /start bosganini va ID to‘g‘riligini tekshiring.")
+        return True
+    await send_text(session, chat_id,
+        "✅ Rasm/video himoyali yuborildi. Bu bir martalik ko‘rish emas; Telegram cheklovini chetlab o‘tadigan norasmiy ilovalarga qarshi kafolat yo‘q.")
+    return True
+
+
+async def handle_protected_media_share(session: aiohttp.ClientSession, message: dict[str, Any]) -> bool:
+    if (message.get("chat") or {}).get("type") != "private":
+        return False
+    chat_id = int(message["chat"]["id"])
+    sender_id = int((message.get("from") or {}).get("id", 0))
+    if sender_id != chat_id:
+        return False
+
+    raw = str(message.get("text") or message.get("caption") or "").strip()
+    command_match = re.fullmatch(r"/protect(?:@[A-Za-z0-9_]+)?(?:\s+([0-9]{1,20}))?", raw, flags=re.IGNORECASE)
+    state = PROTECTED_SHARE_SESSIONS.get(chat_id)
+    if state and state["expires"] <= time.monotonic():
+        PROTECTED_SHARE_SESSIONS.pop(chat_id, None)
+        state = None
+        if not command_match:
+            await send_text(session, chat_id, "Himoyali yuborish vaqti tugadi. Tugmani qayta bosing.")
+            return True
+
+    if command_match:
+        recipient_text = command_match.group(1)
+        if recipient_text is None:
+            await start_protected_media_share(session, chat_id)
+            return True
+        try:
+            recipient_id = int(recipient_text)
+        except ValueError:
+            recipient_id = 0
+        if not (0 < recipient_id < 2**52):
+            await send_text(session, chat_id, "Telegram ID noto‘g‘ri. Raqamni tekshiring.")
+            return True
+        if message.get("photo") or isinstance(message.get("video"), dict):
+            PROTECTED_SHARE_SESSIONS.pop(chat_id, None)
+            return await _send_protected_media(session, message, recipient_id)
+        PROTECTED_SHARE_SESSIONS[chat_id] = {
+            "step": "media", "recipient_id": recipient_id,
+            "expires": time.monotonic() + PROTECTED_SHARE_TTL,
+        }
+        await send_text(session, chat_id, "Endi rasm yoki video yuboring. Bekor qilish: /cancel")
         return True
 
-    await send_text(session, chat_id,
-        "✅ Rasm/video yuborildi. Telegram’ning saqlash va uzatish cheklovi qo‘llandi. "
-        "Bu bir martalik ko‘rish emas; cheklovni ataylab chetlab o‘tadigan ilovalarga qarshi kafolat bermaydi.")
+    if not state:
+        return False
+    if raw.split(maxsplit=1)[0].split("@", 1)[0].lower() == "/cancel" if raw else False:
+        PROTECTED_SHARE_SESSIONS.pop(chat_id, None)
+        await send_text(session, chat_id, "Himoyali yuborish bekor qilindi.")
+        return True
+    if raw.startswith("/"):
+        return False
+    if state["step"] == "recipient":
+        if not re.fullmatch(r"[0-9]{1,20}", raw):
+            await send_text(session, chat_id, "ID faqat raqamlardan iborat bo‘lsin. Qayta yuboring yoki /cancel bosing.")
+            return True
+        recipient_id = int(raw)
+        if not (0 < recipient_id < 2**52):
+            await send_text(session, chat_id, "ID noto‘g‘ri. Qabul qiluvchining /id orqali olgan raqamini kiriting.")
+            return True
+        state.update(step="media", recipient_id=recipient_id)
+        await send_text(session, chat_id, "✅ ID qabul qilindi. Endi rasm yoki video yuboring. Bekor qilish: /cancel")
+        return True
+    recipient_id = int(state["recipient_id"])
+    if message.get("photo") or isinstance(message.get("video"), dict):
+        PROTECTED_SHARE_SESSIONS.pop(chat_id, None)
+        return await _send_protected_media(session, message, recipient_id)
+    await send_text(session, chat_id, "Rasm yoki video yuboring. Bekor qilish: /cancel")
     return True
+
 
 
 async def send_history_menu(session: aiohttp.ClientSession, store: Store, owner: int) -> None:
@@ -1494,9 +1552,7 @@ async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]
     if command == "/start":
         await handle_start(session, chat_id)
     elif command == "/protect":
-        await send_text(session, chat_id,
-            "Rasm/video tanlang va izohiga <code>/protect 123456789</code> yozing. "
-            "Qabul qiluvchi botni avval /start bilan ochgan bo‘lishi kerak.")
+        await start_protected_media_share(session, chat_id)
     elif command == "/id":
         await send_text(session, chat_id, f"🆔 Telegram ID raqamingiz: <code>{chat_id}</code>")
     elif command == "/status":
@@ -1580,10 +1636,7 @@ async def handle_keyboard_button(
     text = {'🔐 Xavfsizlik maslahatlari': '🔐 Maslahatlar', '🔎 Xabarni tekshirish': '🔎 Xabar tekshirish', 'ℹ️ Qanday ishlaydi': 'ℹ️ Qo‘llanma', '🗑 Avto o‘chirish sozlamasi': '🗑 Avto o‘chirish', '⚠️ Yuborilgan xabar ogohlantirishi': '⚠️ Chiquvchi ogohlantirish', '🔬 APK tekshirish · 100 MB': '🔬 APK · 100 MB'}.get(text, text)
     chat_id = int(message["chat"]["id"])
     if text == BUTTON_PROTECTED_SEND:
-        await send_text(session, chat_id,
-            "🖼 <b>Rasm yoki videoni himoyali yuborish</b>\n\n"
-            "Rasm/video tanlang va izohiga <code>/protect 123456789</code> yozing. "
-            "Qabul qiluvchining ID raqamini qo‘ying; u botda /start bosib, /id orqali ID raqamini olsin.")
+        await start_protected_media_share(session, chat_id)
         return True
     elif text == "✖️ Menyuni yopish":
         await api(session, "sendMessage", {"chat_id": chat_id, "text": "Menyu yopildi.", "reply_markup": {"remove_keyboard": True}})
