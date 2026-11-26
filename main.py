@@ -73,12 +73,14 @@ BUTTON_OUTGOING_WARNING = "⚠️ Chiquvchi ogohlantirish"
 BUTTON_HISTORY = "📝 O‘chirilgan xabarlar"
 BUTTON_SECURITY_CENTER = "🛡 Xavfsizlik markazi"
 BUTTON_APK_UPLOAD = "🔬 APK · 100 MB"
+BUTTON_PROTECTED_SEND = "🖼 Himoyali yuborish"
 MAIN_KEYBOARD = {
     "keyboard": [
         [BUTTON_SCAN, BUTTON_STATUS],
         [BUTTON_HISTORY, BUTTON_SECURITY_CENTER],
         [BUTTON_DELETE_MODE, BUTTON_OUTGOING_WARNING],
         [BUTTON_TIPS, channel_recovery.BUTTON],
+        [BUTTON_PROTECTED_SEND],
         [BUTTON_HELP, "✖️ Menyuni yopish"],
     ],
     "resize_keyboard": True,
@@ -959,6 +961,66 @@ async def send_text(session: aiohttp.ClientSession, chat_id: int, text: str) -> 
     })
 
 
+async def handle_protected_media_share(session: aiohttp.ClientSession, message: dict[str, Any]) -> bool:
+    if (message.get("chat") or {}).get("type") != "private":
+        return False
+    raw = str(message.get("text") or message.get("caption") or "").strip()
+    match = re.fullmatch(r"/protect(?:@[A-Za-z0-9_]+)?(?:\\s+([0-9]{1,20}))?", raw, flags=re.IGNORECASE)
+    if not match:
+        return False
+
+    chat_id = int(message["chat"]["id"])
+    sender_id = int((message.get("from") or {}).get("id", 0))
+    if sender_id != chat_id:
+        await send_text(session, chat_id, "Himoyali yuborish faqat bot bilan shaxsiy chatda ishlaydi.")
+        return True
+
+    recipient_text = match.group(1)
+    if not recipient_text:
+        await send_text(session, chat_id,
+            "🖼 <b>Rasm yoki videoni himoyali yuborish</b>\n\n"
+            "Rasm/video tanlang va izohiga quyidagicha yozing: <code>/protect 123456789</code>\n"
+            "123456789 o‘rniga qabul qiluvchining Telegram ID raqamini kiriting. "
+            "Qabul qiluvchi avval botni ochib /start bosgan bo‘lishi kerak.")
+        return True
+
+    if not (message.get("photo") or isinstance(message.get("video"), dict)):
+        await send_text(session, chat_id, "Buyruqni rasm yoki videoga izoh qilib yuboring: <code>/protect 123456789</code>.")
+        return True
+    if any(message.get(key) for key in ("has_protected_content", "paid_media", "ttl_seconds", "self_destruct_time")):
+        await send_text(session, chat_id, "Bir marta ko‘riladigan yoki oldindan himoyalangan media’ni qayta yubora olmayman.")
+        return True
+
+    try:
+        recipient_id = int(recipient_text)
+    except ValueError:
+        recipient_id = 0
+    message_id = message.get("message_id")
+    if not 0 < recipient_id < 2**52 or type(message_id) is not int or message_id <= 0:
+        await send_text(session, chat_id, "Telegram ID yoki xabar raqami noto‘g‘ri. ID faqat raqamlardan iborat bo‘lsin.")
+        return True
+
+    try:
+        await api(session, "copyMessage", {
+            "chat_id": recipient_id,
+            "from_chat_id": chat_id,
+            "message_id": message_id,
+            "caption": "",
+            "protect_content": True,
+        })
+    except TelegramAPIError as exc:
+        if isinstance(exc, TelegramTemporaryError):
+            raise
+        await send_text(session, chat_id,
+            "Yuborilmadi. Qabul qiluvchi botni ochib /start bosganini, ID to‘g‘riligini va botni bloklamaganini tekshiring.")
+        return True
+
+    await send_text(session, chat_id,
+        "✅ Rasm/video yuborildi. Telegram’ning saqlash va uzatish cheklovi qo‘llandi. "
+        "Bu bir martalik ko‘rish emas; cheklovni ataylab chetlab o‘tadigan ilovalarga qarshi kafolat bermaydi.")
+    return True
+
+
 async def send_history_menu(session: aiohttp.ClientSession, store: Store, owner: int) -> None:
     status = "🟢 YOQILGAN" if store.history_enabled(owner) else "⚪ O‘CHIRILGAN"
     await send_text(session, owner,
@@ -1430,6 +1492,10 @@ async def handle_command(session: aiohttp.ClientSession, message: dict[str, Any]
     command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
     if command == "/start":
         await handle_start(session, chat_id)
+    elif command == "/protect":
+        await send_text(session, chat_id,
+            "Rasm/video tanlang va izohiga <code>/protect 123456789</code> yozing. "
+            "Qabul qiluvchi botni avval /start bilan ochgan bo‘lishi kerak.")
     elif command == "/status":
         await handle_status(session, chat_id)
     elif command == "/tips":
@@ -1510,7 +1576,12 @@ async def handle_keyboard_button(
     text = str(message.get("text") or "").strip()
     text = {'🔐 Xavfsizlik maslahatlari': '🔐 Maslahatlar', '🔎 Xabarni tekshirish': '🔎 Xabar tekshirish', 'ℹ️ Qanday ishlaydi': 'ℹ️ Qo‘llanma', '🗑 Avto o‘chirish sozlamasi': '🗑 Avto o‘chirish', '⚠️ Yuborilgan xabar ogohlantirishi': '⚠️ Chiquvchi ogohlantirish', '🔬 APK tekshirish · 100 MB': '🔬 APK · 100 MB'}.get(text, text)
     chat_id = int(message["chat"]["id"])
-    if text == "✖️ Menyuni yopish":
+    if text == BUTTON_PROTECTED_SEND:
+        await send_text(session, chat_id,
+            "🖼 <b>Rasm yoki videoni himoyali yuborish</b>\n\n"
+            "Rasm/video tanlang va izohiga <code>/protect 123456789</code> yozing. "
+            "Qabul qiluvchining ID raqamini qo‘ying; u avval botga /start yuborgan bo‘lishi kerak.")
+    elif text == "✖️ Menyuni yopish":
         await api(session, "sendMessage", {"chat_id": chat_id, "text": "Menyu yopildi.", "reply_markup": {"remove_keyboard": True}})
         await send_text(session, chat_id, "Kerak bo‘lsa menyuni qayta oching.")
         return True
@@ -1526,6 +1597,11 @@ async def handle_keyboard_button(
             "Ogohlantirish xavf belgisi borligini bildiradi; bot faylni antivirus kabi tahlil qilmaydi.")
     elif text in {BUTTON_HELP, "ℹ️ Qo‘llanma"}:
         await send_video_guide(session, store, chat_id)
+    elif text == BUTTON_PROTECTED_SEND:
+        await send_text(session, chat_id,
+            "🖼 <b>Rasm yoki videoni himoyali yuborish</b>\n\n"
+            "Rasm/video tanlang va izohiga <code>/protect 123456789</code> yozing. "
+            "Qabul qiluvchining ID raqamini qo‘ying; u avval botga /start yuborgan bo‘lishi kerak.")
     elif text == BUTTON_SCAN:
         await send_text(session, chat_id,
             "🔎 <b>Qo‘lda tekshirish</b>\n\n"
@@ -1925,6 +2001,8 @@ async def process_update(session: aiohttp.ClientSession, store: Store, update: d
         chat_type = (message.get("chat") or {}).get("type")
         if chat_type in {"group", "supergroup"}:
             await moderate_group_message(session, message)
+            return
+        if chat_type == "private" and "message" in update and await handle_protected_media_share(session, message):
             return
         if chat_type == "private" and await accept_video_guide(session, store, message):
             return
