@@ -965,7 +965,7 @@ async def handle_protected_media_share(session: aiohttp.ClientSession, message: 
     if (message.get("chat") or {}).get("type") != "private":
         return False
     raw = str(message.get("text") or message.get("caption") or "").strip()
-    match = re.fullmatch(r"/protect(?:@[A-Za-z0-9_]+)?(?:\\s+([0-9]{1,20}))?", raw, flags=re.IGNORECASE)
+    match = re.fullmatch(r"/protect(?:@[A-Za-z0-9_]+)?(?:\s+([0-9]{1,20}))?", raw, flags=re.IGNORECASE)
     if not match:
         return False
 
